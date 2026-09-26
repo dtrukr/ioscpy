@@ -57,9 +57,13 @@ fn main() {
 
 fn run(cli: &Cli) -> Result<()> {
     if cli.list_json {
+        let devices = match &cli.remote {
+            Some(host) => remote::list_devices(host)?,
+            None => device::list_devices()?,
+        };
         println!("{}", serde_json::to_string(&remote::DeviceList {
             protocol: protocol::PROTOCOL_VERSION,
-            devices: device::list_devices()?,
+            devices,
         })?);
         return Ok(());
     }
