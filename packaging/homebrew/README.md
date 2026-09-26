@@ -1,63 +1,28 @@
-# Homebrew formula
+# Homebrew formula for the ioscpy fork
 
-This is the formula that installs the ioscpy Mac app. It builds the host binary
-from source with the Rust toolchain and pulls in libimobiledevice, which the USB
-transport needs at runtime.
+This formula builds the macOS host from the public
+[dtrukr/ioscpy](https://github.com/dtrukr/ioscpy) fork. It is pinned to a tested
+protocol 5 commit and uses a verified source archive checksum. The matching
+device package must also come from this fork; the upstream tap and Sileo package
+use protocol 4.
 
-## How users install it
-
-Once the tap is published, installing is two lines:
-
-```bash
-brew tap lautarovculic/ioscpy
-brew install ioscpy
-```
-
-Updates later are just `brew upgrade ioscpy`.
-
-## Publishing a release
-
-The formula points at a tagged source tarball and checks its hash, so a release
-is: tag the code, then update `url` and `sha256` to match.
-
-1. Tag and push the version in the main repo:
-
-   ```bash
-   git tag v0.1.5
-   git push origin v0.1.5
-   ```
-
-2. Get the hash of the tarball GitHub builds for that tag:
-
-   ```bash
-   curl -fsSL https://github.com/lautarovculic/ioscpy/archive/refs/tags/v0.1.5.tar.gz \
-     | shasum -a 256
-   ```
-
-3. Put the version and that hash into `ioscpy.rb`: set `url` to the same tag and
-   replace the `sha256` value.
-
-4. Copy the formula into your tap repository. The tap is a separate GitHub repo
-   named `homebrew-ioscpy`, and the file lives at `Formula/ioscpy.rb`:
-
-   ```bash
-   cp packaging/homebrew/ioscpy.rb /path/to/homebrew-ioscpy/Formula/ioscpy.rb
-   ```
-
-   Commit and push that repo. The `lautarovculic/ioscpy` in `brew tap` maps to
-   `github.com/lautarovculic/homebrew-ioscpy`.
-
-## Testing before you publish
-
-You can install straight from the local file to check it builds:
+Install the formula from a clone of this repository:
 
 ```bash
 brew install --build-from-source ./packaging/homebrew/ioscpy.rb
 ioscpy --version
 ```
 
-Or track the latest commit without a tagged release:
+The main [README](../../README.md) also documents a direct `make install-host`
+installation. Do not install both into the same Homebrew prefix.
+
+To update this formula, first push and test a fork commit. Replace the commit
+in `url`, set `version`, and compute the checksum of the exact archive:
 
 ```bash
-brew install --HEAD lautarovculic/ioscpy/ioscpy
+curl -fLsS https://github.com/dtrukr/ioscpy/archive/<commit>.tar.gz \
+  | shasum -a 256
 ```
+
+The `head` entry builds the current `main` branch when installed with Homebrew's
+`--HEAD` option.

@@ -1,12 +1,11 @@
 class Ioscpy < Formula
   desc "Mirror and control a jailbroken iPhone from macOS over USB"
-  homepage "https://lautarovculic.com"
-  url "https://github.com/lautarovculic/ioscpy/archive/refs/tags/v0.1.5.tar.gz"
-  # TODO(v0.1.5): set to the sha256 of the v0.1.5 tarball, printed by
-  #   curl -fsSL <url above> | shasum -a 256
-  sha256 "PENDING_v0.1.5_TARBALL_SHA256"
+  homepage "https://github.com/dtrukr/ioscpy"
+  url "https://github.com/dtrukr/ioscpy/archive/e72869fb31d0d88a590292f9992dfc905d3f01fd.tar.gz"
+  version "0.1.5"
+  sha256 "d91c8ee86621a3c8e49178571777ac5c7d2f9df247580a1b4e3e84ecedb1b31a"
   license "MIT"
-  head "https://github.com/lautarovculic/ioscpy.git", branch: "main"
+  head "https://github.com/dtrukr/ioscpy.git", branch: "main"
 
   # Builds with the Rust toolchain; the libimobiledevice tools (iproxy,
   # idevice_id, ideviceinfo) are needed at runtime for the USB transport.
