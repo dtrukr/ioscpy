@@ -67,7 +67,7 @@ ioscpy --version
 ```
 
 The matching rootless device package is available in the
-[v0.1.6 release](https://github.com/dtrukr/ioscpy/releases/tag/v0.1.6).
+[v0.1.7 release](https://github.com/dtrukr/ioscpy/releases/tag/v0.1.7).
 To build it yourself instead:
 
 ```bash

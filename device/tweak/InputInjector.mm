@@ -44,6 +44,9 @@ void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client, IOHID
 void IOHIDEventSystemClientScheduleWithRunLoop(IOHIDEventSystemClientRef, CFRunLoopRef, CFStringRef);
 void IOHIDEventSystemClientRegisterEventCallback(IOHIDEventSystemClientRef, void *cb, void *target,
                                                  void *refcon);
+CFArrayRef IOHIDEventSystemClientCopyServices(IOHIDEventSystemClientRef client);
+Boolean IOHIDServiceClientConformsTo(void *service, uint32_t page, uint32_t usage);
+CFTypeRef IOHIDServiceClientGetRegistryID(void *service);
 }
 
 #define kIOHIDDigitizerEventRange 0x00000001u
@@ -55,6 +58,7 @@ void IOHIDEventSystemClientRegisterEventCallback(IOHIDEventSystemClientRef, void
 
 // Digitizer field selectors (same magic values long-used by touch tools).
 #define kFieldDigitizerIsDisplayInteg 0x000b0019
+#define kFieldIsBuiltIn 0x00000004
 #define kFieldDigitizerEventMask 0x000b0007
 #define kFieldDigitizerRange 0x000b0008
 #define kFieldDigitizerTouch 0x000b0009
@@ -64,6 +68,39 @@ void IOHIDEventSystemClientRegisterEventCallback(IOHIDEventSystemClientRef, void
 static uint64_t gSenderID = 0;
 static IOHIDEventSystemClientRef gClient = NULL;
 static IOHIDEventSystemClientRef gMonitor = NULL;
+
+// Resolve the physical touchscreen's sender ID directly from the HID service.
+// This is the mechanism used by iphone-ui/ZXTouch and works immediately after
+// respring, without requiring a real touch first.
+static uint64_t digitizerSenderID(void) {
+    IOHIDEventSystemClientRef client = IOHIDEventSystemClientCreate(kCFAllocatorDefault);
+    if (!client) {
+        return 0;
+    }
+    CFArrayRef services = IOHIDEventSystemClientCopyServices(client);
+    uint64_t result = 0;
+    if (services) {
+        for (CFIndex i = 0; i < CFArrayGetCount(services); i++) {
+            void *service = (void *)CFArrayGetValueAtIndex(services, i);
+            if (!IOHIDServiceClientConformsTo(service, 0x0d, 0x04)) {
+                continue; // digitizer touchscreen
+            }
+            CFTypeRef number = IOHIDServiceClientGetRegistryID(service);
+            if (number && CFGetTypeID(number) == CFNumberGetTypeID()) {
+                CFNumberGetValue((CFNumberRef)number, kCFNumberSInt64Type, &result);
+            }
+            if (number) {
+                CFRelease(number);
+            }
+            if (result) {
+                break;
+            }
+        }
+        CFRelease(services);
+    }
+    CFRelease(client);
+    return result;
+}
 
 // Learn the real digitizer sender id from the first physical touch. Some builds
 // drop injected events without it.
@@ -82,6 +119,10 @@ static void hidInit(void) {
     if (!gClient) {
         NSLog(@"[ioscpyhook] IOHIDEventSystemClientCreate returned NULL (not in SpringBoard?)");
         return;
+    }
+    gSenderID = digitizerSenderID();
+    if (gSenderID) {
+        NSLog(@"[ioscpyhook] resolved digitizer senderID 0x%llx", gSenderID);
     }
     gMonitor = IOHIDEventSystemClientCreate(kCFAllocatorDefault);
     if (gMonitor) {
@@ -209,41 +250,57 @@ void IOSPYInjectTouch(IOSPYTouchPhase phase, uint8_t fingerID, float x, float y)
     float rx, ry;
     rotatePoint(currentOrientation(), x, y, &rx, &ry);
 
-    uint64_t ts = mach_absolute_time();
-    Boolean touch = (phase != IOSPYTouchUp);
-    Boolean range = touch;
-    uint32_t mask = (phase == IOSPYTouchMove)
-                        ? kIOHIDDigitizerEventPosition
-                        : (kIOHIDDigitizerEventRange | kIOHIDDigitizerEventTouch);
+    if (gSenderID == 0) {
+        NSLog(@"[ioscpyhook] no digitizer sender ID; dropping touch");
+        return;
+    }
 
+    // Match the event shape used by ZXTouch/iphone-ui. The parent identifies
+    // the synthetic hand; the child mask identifies began, moved, or ended.
+    uint64_t ts = mach_absolute_time();
     IOHIDEventRef parent = IOHIDEventCreateDigitizerEvent(
-        kCFAllocatorDefault, ts, kIOHIDDigitizerTransducerTypeHand, 0, 0, mask, 0, 0, 0, 0, 0, 0,
-        range, touch, 0);
+        kCFAllocatorDefault, ts, kIOHIDDigitizerTransducerTypeHand, 99, 1, 0, 0, 0, 0, 0, 0, 0,
+        false, false, 0);
+    IOHIDEventSetIntegerValue(parent, kFieldIsBuiltIn, 1);
     IOHIDEventSetIntegerValue(parent, kFieldDigitizerIsDisplayInteg, 1);
 
+    uint32_t childMask;
+    Boolean range;
+    Boolean touch;
+    switch (phase) {
+        case IOSPYTouchDown:
+            childMask = kIOHIDDigitizerEventRange | kIOHIDDigitizerEventTouch;
+            range = true;
+            touch = true;
+            break;
+        case IOSPYTouchMove:
+            childMask = kIOHIDDigitizerEventPosition;
+            range = true;
+            touch = true;
+            break;
+        case IOSPYTouchUp:
+        default:
+            childMask = kIOHIDDigitizerEventTouch;
+            range = false;
+            touch = false;
+            break;
+    }
     IOHIDEventRef finger = IOHIDEventCreateDigitizerFingerEvent(
-        kCFAllocatorDefault, ts, (uint32_t)fingerID, (uint32_t)fingerID + 1, mask,
-        (IOHIDFloat)rx, (IOHIDFloat)ry, 0, touch ? 1.0 : 0.0, 0, range, touch, 0);
+        kCFAllocatorDefault, ts, (uint32_t)fingerID + 1, 3, childMask,
+        (IOHIDFloat)rx, (IOHIDFloat)ry, 0, 0, 0, range, touch, 0);
     IOHIDEventSetFloatValue(finger, kFieldDigitizerMajorRadius, 0.04f);
     IOHIDEventSetFloatValue(finger, kFieldDigitizerMinorRadius, 0.04f);
+    IOHIDEventSetIntegerValue(finger, kFieldIsBuiltIn, 1);
+    IOHIDEventSetIntegerValue(finger, kFieldDigitizerIsDisplayInteg, 1);
 
     IOHIDEventAppendEvent(parent, finger);
-    // What this event reports. A down/up announces a finger arriving or leaving
-    // (range + touch, with its identity); a move announces a position change.
-    // Re-asserting range+touch on every move makes each one read as a fresh
-    // touch-begin, so a drag never coalesces into a continuous pan. Moves carry
-    // the position bit instead, which is what lets swipes and scrolls track.
-    uint32_t parentMask = (phase == IOSPYTouchMove)
-                              ? kIOHIDDigitizerEventPosition
-                              : (kIOHIDDigitizerEventRange | kIOHIDDigitizerEventTouch |
-                                 kIOHIDDigitizerEventIdentity);
-    IOHIDEventSetIntegerValue(parent, kFieldDigitizerEventMask, parentMask);
-    IOHIDEventSetIntegerValue(parent, kFieldDigitizerRange, range ? 1 : 0);
-    IOHIDEventSetIntegerValue(parent, kFieldDigitizerTouch, touch ? 1 : 0);
+    IOHIDEventSetIntegerValue(parent, kFieldDigitizerEventMask,
+                              kIOHIDDigitizerEventRange | kIOHIDDigitizerEventTouch |
+                                  kIOHIDDigitizerEventIdentity);
+    IOHIDEventSetIntegerValue(parent, kFieldDigitizerRange, 1);
+    IOHIDEventSetIntegerValue(parent, kFieldDigitizerTouch, 1);
 
-    if (gSenderID != 0) {
-        IOHIDEventSetSenderID(parent, gSenderID);
-    }
+    IOHIDEventSetSenderID(parent, gSenderID);
 
     IOHIDEventSystemClientDispatchEvent(gClient, parent);
 
