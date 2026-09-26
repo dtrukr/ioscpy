@@ -32,4 +32,8 @@
 // the video pump.
 - (void)setHostFd:(int)fd writeLock:(NSLock *)lock;
 
+// Accessibility requests may arrive on a control-only connection while the
+// video owner stays connected. Route their replies to that connection.
+- (void)setReplyFd:(int)fd writeLock:(NSLock *)lock;
+
 @end

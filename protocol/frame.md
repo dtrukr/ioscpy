@@ -13,7 +13,7 @@ payload. All multibyte integers are big-endian (network byte order).
 ```c
 struct IoscpyFrameHeader {
     uint32_t magic;       // 'ICPY' == 0x49435059
-    uint16_t version;     // protocol version (currently 4)
+    uint16_t version;     // protocol version (currently 5)
     uint16_t type;        // message type (see messages.md)
     uint32_t flags;       // reserved for compression and encryption (0 for now)
     uint64_t stream_id;   // logical channel (0 = control, 1 = video)
@@ -39,7 +39,7 @@ Field offsets:
 
 ```text
 MAGIC             = 0x49435059   ("ICPY")
-PROTOCOL_VERSION  = 4
+PROTOCOL_VERSION  = 5
 HEADER_SIZE       = 32 bytes
 DEFAULT_PORT      = 27183        (daemon binds 127.0.0.1:27183 only)
 MAX_PAYLOAD       = 16 MiB       (upper bound; larger frames are rejected)

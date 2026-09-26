@@ -4,7 +4,7 @@
 #import <Foundation/Foundation.h>
 
 #define IOSPY_MAGIC            0x49435059u   // 'ICPY'
-#define IOSPY_PROTOCOL_VERSION 4
+#define IOSPY_PROTOCOL_VERSION 5
 #define IOSPY_HEADER_SIZE      32
 #define IOSPY_DEFAULT_PORT     27183
 #define IOSPY_FRAME_PORT       27184   // loopback channel between tweak and daemon
@@ -53,6 +53,10 @@ typedef NS_ENUM(uint16_t, IOSPYMessageType) {
     IOSPYMsgPong                 = 61,
     IOSPYMsgError                = 70,
     IOSPYMsgLog                  = 71,
+    IOSPYMsgAccessibilitySnapshot = 80,
+    IOSPYMsgAccessibilityTree    = 81,
+    IOSPYMsgAccessibilityAction  = 82,
+    IOSPYMsgAccessibilityActionResult = 83,
 };
 
 typedef struct {

@@ -25,6 +25,7 @@ mod video;
 mod wayland_compat;
 mod window;
 
+use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -80,13 +81,13 @@ fn cmd_connect(cli: &Cli) -> Result<()> {
     // background refresh for next time. Opt out with IOSCPY_NO_UPDATE_CHECK.
     if std::env::var_os("IOSCPY_NO_UPDATE_CHECK").is_none() {
         if let Some(notice) = update::pending_notice(HOST_VERSION) {
-            println!("{notice}");
+            eprintln!("{notice}");
         }
         update::refresh_in_background();
     }
 
     let banner = format!("ioscpy v{HOST_VERSION} - lautarovculic.com");
-    println!("{banner}");
+    eprintln!("{banner}");
 
     let port = cli.port.unwrap_or(protocol::DEFAULT_PORT);
 
@@ -105,6 +106,10 @@ fn cmd_connect(cli: &Cli) -> Result<()> {
         return run_connection_loop(cli, port, &stop, None, None, None);
     }
 
+    if cli.stdio_bridge {
+        return cmd_stdio_bridge(cli, port, &stop);
+    }
+
     // Grab one frame for testing the stream path.
     if let Some(path) = cli.snapshot.clone() {
         return cmd_snapshot(cli, port, &path);
@@ -118,6 +123,21 @@ fn cmd_connect(cli: &Cli) -> Result<()> {
     // System-action test.
     if let Some(code) = cli.action {
         return cmd_action(cli, port, code);
+    }
+
+    // Accessibility tree dump for automation experiments.
+    if cli.accessibility_tree {
+        return cmd_accessibility_tree(cli, port);
+    }
+
+    // Accessibility action for automation experiments.
+    if cli.accessibility_action.is_some() {
+        return cmd_accessibility_action(cli, port);
+    }
+
+    // One-shot input/control operations for automation.
+    if cli.has_one_shot_input() {
+        return cmd_one_shot_input(cli, port);
     }
 
     // Run the real session loop headless for a while.
@@ -166,6 +186,197 @@ fn cmd_connect(cli: &Cli) -> Result<()> {
     stop.store(true, Ordering::Relaxed);
     let _ = net.join();
     result
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum StdioBridgeCommand {
+    Touch { phase: String, x: f32, y: f32 },
+    Action { code: u16 },
+    Text { text: String },
+    Key { key: String },
+    KeyboardMode { suppress: bool },
+}
+
+fn cmd_stdio_bridge(cli: &Cli, port: u16, stop: &Arc<AtomicBool>) -> Result<()> {
+    let mut forward: Option<usbmux::UsbForward> = None;
+    let mut stream = establish(cli, port, &mut forward)?;
+    stream.set_nodelay(true).ok();
+    stream.set_read_timeout(None).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(6))).ok();
+
+    let ack = protocol::handshake(&mut stream, HOST_VERSION).context("handshake failed")?;
+    if ack.capabilities.stream_backends.is_empty() {
+        bail!("the phone side is not advertising a stream backend");
+    }
+    if ack.capabilities.input_backends.is_empty() {
+        bail!("the phone side is not advertising an input backend");
+    }
+
+    let mut writer = stream.try_clone().context("clone bridge control stream")?;
+    protocol::write_frame(
+        &mut writer,
+        protocol::MessageType::StartStream,
+        protocol::CHANNEL_CONTROL,
+        0,
+        &[protocol::VIDEO_CODEC_MJPEG],
+    )?;
+
+    let (command_tx, command_rx) = mpsc::channel::<StdioBridgeCommand>();
+    let input_stop = stop.clone();
+    thread::spawn(move || {
+        let stdin = std::io::stdin();
+        for line in BufReader::new(stdin.lock()).lines() {
+            if input_stop.load(Ordering::Relaxed) {
+                break;
+            }
+            match line {
+                Ok(line) if !line.trim().is_empty() => {
+                    match serde_json::from_str::<StdioBridgeCommand>(&line) {
+                        Ok(command) => {
+                            if command_tx.send(command).is_err() {
+                                break;
+                            }
+                        }
+                        Err(error) => eprintln!("ioscpy bridge: invalid command: {error}"),
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!("ioscpy bridge: stdin failed: {error}");
+                    break;
+                }
+            }
+        }
+        input_stop.store(true, Ordering::Relaxed);
+    });
+
+    let writer_stop = stop.clone();
+    let writer_handle = thread::spawn(move || -> Result<()> {
+        let mut seq = 1u64;
+        let mut last_ping = Instant::now();
+        let mut last_touch: Option<(f32, f32)> = None;
+        while !writer_stop.load(Ordering::Relaxed) {
+            match command_rx.recv_timeout(Duration::from_millis(8)) {
+                Ok(StdioBridgeCommand::Touch { phase, x, y }) => {
+                    let x = x.clamp(0.0, 1.0);
+                    let y = y.clamp(0.0, 1.0);
+                    let phase = match phase.as_str() {
+                        "down" => protocol::TouchPhase::Down,
+                        "move" => protocol::TouchPhase::Move,
+                        "up" => protocol::TouchPhase::Up,
+                        _ => {
+                            eprintln!("ioscpy bridge: unknown touch phase {phase:?}");
+                            continue;
+                        }
+                    };
+                    if phase == protocol::TouchPhase::Move {
+                        if let Some((start_x, start_y)) = last_touch {
+                            let distance = (x - start_x).abs().max((y - start_y).abs());
+                            let steps = (distance / 0.015).ceil().clamp(1.0, 48.0) as u32;
+                            for step in 1..=steps {
+                                let t = step as f32 / steps as f32;
+                                send_touch_frame(
+                                    &mut writer,
+                                    phase,
+                                    start_x + (x - start_x) * t,
+                                    start_y + (y - start_y) * t,
+                                    &mut seq,
+                                )?;
+                                if step < steps {
+                                    thread::sleep(Duration::from_millis(2));
+                                }
+                            }
+                        } else {
+                            send_touch_frame(&mut writer, phase, x, y, &mut seq)?;
+                        }
+                    } else {
+                        send_touch_frame(&mut writer, phase, x, y, &mut seq)?;
+                    }
+                    last_touch = if phase == protocol::TouchPhase::Up {
+                        None
+                    } else {
+                        Some((x, y))
+                    };
+                }
+                Ok(StdioBridgeCommand::Action { code }) => {
+                    write_control_frame(
+                        &mut writer,
+                        protocol::MessageType::SystemAction,
+                        &code.to_be_bytes(),
+                        &mut seq,
+                    )?;
+                }
+                Ok(StdioBridgeCommand::Text { text }) => {
+                    write_control_frame(
+                        &mut writer,
+                        protocol::MessageType::InputText,
+                        &protocol::encode_text(&text),
+                        &mut seq,
+                    )?;
+                }
+                Ok(StdioBridgeCommand::Key { key }) => {
+                    let code = match parse_key_code(&key) {
+                        Ok(code) => code,
+                        Err(error) => {
+                            eprintln!("ioscpy bridge: unknown key {key:?}: {error}");
+                            continue;
+                        }
+                    };
+                    write_control_frame(
+                        &mut writer,
+                        protocol::MessageType::InputKey,
+                        &protocol::encode_key(code),
+                        &mut seq,
+                    )?;
+                }
+                Ok(StdioBridgeCommand::KeyboardMode { suppress }) => {
+                    write_control_frame(
+                        &mut writer,
+                        protocol::MessageType::KeyboardMode,
+                        &protocol::encode_keyboard_mode(suppress),
+                        &mut seq,
+                    )?;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+
+            if last_ping.elapsed() >= Duration::from_secs(3) {
+                write_control_frame(&mut writer, protocol::MessageType::Ping, &[], &mut seq)?;
+                last_ping = Instant::now();
+            }
+        }
+        Ok(())
+    });
+
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    while !stop.load(Ordering::Relaxed) {
+        let frame = protocol::read_frame(&mut stream)?;
+        if frame.message_type() != Some(protocol::MessageType::VideoFrame) {
+            continue;
+        }
+        let Some((width, height, flags, jpeg)) = protocol::parse_video_payload(&frame.payload)
+        else {
+            continue;
+        };
+        if flags & protocol::VIDEO_FLAG_H264 != 0 {
+            continue;
+        }
+
+        output.write_all(b"ICBR")?;
+        output.write_all(&width.to_be_bytes())?;
+        output.write_all(&height.to_be_bytes())?;
+        output.write_all(&flags.to_be_bytes())?;
+        output.write_all(&(jpeg.len() as u32).to_be_bytes())?;
+        output.write_all(jpeg)?;
+        output.flush()?;
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = writer_handle.join();
+    Ok(())
 }
 
 /// Connect, handshake, run the session, and reconnect on drops until `stop` is set.
@@ -443,8 +654,8 @@ fn cmd_bench(cli: &Cli, port: u16, secs: u64) -> Result<()> {
     Ok(())
 }
 
-/// Send one system action and report whether the stream survives it.
-fn cmd_action(cli: &Cli, port: u16, code: u16) -> Result<()> {
+/// Send one or more automation input frames and exit without opening a window.
+fn cmd_one_shot_input(cli: &Cli, port: u16) -> Result<()> {
     let mut forward: Option<usbmux::UsbForward> = None;
     let mut stream = establish(cli, port, &mut forward)?;
     stream.set_nodelay(true).ok();
@@ -452,27 +663,290 @@ fn cmd_action(cli: &Cli, port: u16, code: u16) -> Result<()> {
     stream.set_write_timeout(Some(Duration::from_secs(6))).ok();
 
     let ack = protocol::handshake(&mut stream, HOST_VERSION).context("handshake failed")?;
-    println!("input backends: {:?}", ack.capabilities.input_backends);
+    if ack.capabilities.input_backends.is_empty()
+        && (cli.tap.is_some() || cli.swipe.is_some() || cli.text.is_some() || cli.key.is_some())
+    {
+        bail!("the phone side is not advertising an input backend; make sure ioscpyhook is loaded");
+    }
+
+    let mut seq = 1;
+    if let Some(mode) = &cli.keyboard_mode {
+        let suppress = parse_keyboard_mode(mode)?;
+        write_control_frame(
+            &mut stream,
+            protocol::MessageType::KeyboardMode,
+            &protocol::encode_keyboard_mode(suppress),
+            &mut seq,
+        )?;
+    }
+
+    if let Some(text) = &cli.clipboard_set {
+        let mut payload = Vec::with_capacity(1 + text.len());
+        payload.push(if cli.paste { 1 } else { 0 });
+        payload.extend_from_slice(text.as_bytes());
+        write_control_frame(
+            &mut stream,
+            protocol::MessageType::ClipboardSet,
+            &payload,
+            &mut seq,
+        )?;
+    } else if cli.paste {
+        bail!("--paste requires --clipboard-set");
+    }
+
+    if let Some(text) = &cli.text {
+        write_control_frame(
+            &mut stream,
+            protocol::MessageType::InputText,
+            &protocol::encode_text(text),
+            &mut seq,
+        )?;
+    }
+
+    if let Some(key) = &cli.key {
+        let code = parse_key_code(key)?;
+        write_control_frame(
+            &mut stream,
+            protocol::MessageType::InputKey,
+            &protocol::encode_key(code),
+            &mut seq,
+        )?;
+    }
+
+    if let Some(tap) = &cli.tap {
+        let (x, y) = parse_pair(tap)?;
+        send_touch_frame(&mut stream, protocol::TouchPhase::Down, x, y, &mut seq)?;
+        thread::sleep(Duration::from_millis(35));
+        send_touch_frame(&mut stream, protocol::TouchPhase::Up, x, y, &mut seq)?;
+    }
+
+    if let Some(swipe) = &cli.swipe {
+        let (x1, y1, x2, y2) = parse_quad(swipe)?;
+        let duration = Duration::from_millis(cli.duration_ms.max(1));
+        send_touch_frame(&mut stream, protocol::TouchPhase::Down, x1, y1, &mut seq)?;
+        let steps = ((cli.duration_ms / 16).clamp(3, 60)) as u32;
+        for step in 1..steps {
+            let t = step as f32 / steps as f32;
+            let x = x1 + (x2 - x1) * t;
+            let y = y1 + (y2 - y1) * t;
+            send_touch_frame(&mut stream, protocol::TouchPhase::Move, x, y, &mut seq)?;
+            thread::sleep(duration / steps);
+        }
+        send_touch_frame(&mut stream, protocol::TouchPhase::Up, x2, y2, &mut seq)?;
+    }
+
+    Ok(())
+}
+
+fn write_control_frame(
+    stream: &mut TcpStream,
+    message_type: protocol::MessageType,
+    payload: &[u8],
+    seq: &mut u64,
+) -> Result<()> {
+    protocol::write_frame(
+        stream,
+        message_type,
+        protocol::CHANNEL_CONTROL,
+        *seq,
+        payload,
+    )?;
+    *seq += 1;
+    Ok(())
+}
+
+fn send_touch_frame(
+    stream: &mut TcpStream,
+    phase: protocol::TouchPhase,
+    x: f32,
+    y: f32,
+    seq: &mut u64,
+) -> Result<()> {
+    write_control_frame(
+        stream,
+        protocol::MessageType::InputTouch,
+        &protocol::encode_touch(phase, 0, x, y),
+        seq,
+    )
+}
+
+fn parse_pair(raw: &str) -> Result<(f32, f32)> {
+    let parts: Vec<_> = raw.split(',').map(str::trim).collect();
+    if parts.len() != 2 {
+        bail!("expected X,Y normalized coordinates");
+    }
+    Ok((parse_norm(parts[0], "x")?, parse_norm(parts[1], "y")?))
+}
+
+fn parse_quad(raw: &str) -> Result<(f32, f32, f32, f32)> {
+    let parts: Vec<_> = raw.split(',').map(str::trim).collect();
+    if parts.len() != 4 {
+        bail!("expected X1,Y1,X2,Y2 normalized coordinates");
+    }
+    Ok((
+        parse_norm(parts[0], "x1")?,
+        parse_norm(parts[1], "y1")?,
+        parse_norm(parts[2], "x2")?,
+        parse_norm(parts[3], "y2")?,
+    ))
+}
+
+fn parse_norm(raw: &str, name: &str) -> Result<f32> {
+    let value: f32 = raw
+        .parse()
+        .with_context(|| format!("invalid {name} coordinate: {raw}"))?;
+    if !(0.0..=1.0).contains(&value) {
+        bail!("{name} must be in [0,1], got {value}");
+    }
+    Ok(value)
+}
+
+fn parse_keyboard_mode(raw: &str) -> Result<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "hide" | "hidden" | "suppress" | "on" | "1" | "true" => Ok(true),
+        "show" | "restore" | "off" | "0" | "false" => Ok(false),
+        other => bail!("unknown keyboard mode {other:?}; expected hide or show"),
+    }
+}
+
+fn parse_key_code(raw: &str) -> Result<protocol::KeyCode> {
+    match raw.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+        "enter" | "return" => Ok(protocol::KeyCode::Enter),
+        "backspace" | "delete" => Ok(protocol::KeyCode::Backspace),
+        "tab" => Ok(protocol::KeyCode::Tab),
+        "escape" | "esc" => Ok(protocol::KeyCode::Escape),
+        "left" | "arrow-left" => Ok(protocol::KeyCode::Left),
+        "right" | "arrow-right" => Ok(protocol::KeyCode::Right),
+        "up" | "arrow-up" => Ok(protocol::KeyCode::Up),
+        "down" | "arrow-down" => Ok(protocol::KeyCode::Down),
+        "select-all" | "selectall" | "cmd-a" => Ok(protocol::KeyCode::SelectAll),
+        "copy" | "cmd-c" => Ok(protocol::KeyCode::Copy),
+        "paste" | "cmd-v" => Ok(protocol::KeyCode::Paste),
+        "cut" | "cmd-x" => Ok(protocol::KeyCode::Cut),
+        "undo" | "cmd-z" => Ok(protocol::KeyCode::Undo),
+        other => bail!("unknown key {other:?}"),
+    }
+}
+
+/// Request a JSON accessibility tree from the device side and print it.
+fn cmd_accessibility_tree(cli: &Cli, port: u16) -> Result<()> {
+    let mut forward: Option<usbmux::UsbForward> = None;
+    let mut stream = establish(cli, port, &mut forward)?;
+    stream.set_nodelay(true).ok();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(6))).ok();
+
+    let ack = protocol::handshake(&mut stream, HOST_VERSION).context("handshake failed")?;
+    if !ack.capabilities.accessibility {
+        bail!("the phone side is not advertising accessibility support; install a matching ioscpy device package and respring");
+    }
+
+    let request = serde_json::json!({
+        "max_depth": 12,
+        "max_nodes": 2000,
+        "include_hidden": false
+    });
     protocol::write_frame(
         &mut stream,
-        protocol::MessageType::StartStream,
+        protocol::MessageType::AccessibilitySnapshot,
         protocol::CHANNEL_CONTROL,
-        0,
-        &[],
+        1,
+        &serde_json::to_vec(&request)?,
     )?;
 
-    // Warm up: count frames for about 2s.
-    let mut before = 0u32;
-    let t0 = Instant::now();
-    while t0.elapsed() < Duration::from_secs(2) {
-        let f = protocol::read_frame(&mut stream)?;
-        if f.message_type() == Some(protocol::MessageType::VideoFrame) {
-            before += 1;
+    loop {
+        let frame = protocol::read_frame(&mut stream)?;
+        match frame.message_type() {
+            Some(protocol::MessageType::AccessibilityTree) => {
+                println!("{}", String::from_utf8_lossy(&frame.payload));
+                return Ok(());
+            }
+            Some(protocol::MessageType::Error) => {
+                let error: protocol::DaemonError = serde_json::from_slice(&frame.payload)?;
+                bail!(
+                    "accessibility tree failed [{}]: {}",
+                    error.code,
+                    error.message
+                );
+            }
+            Some(protocol::MessageType::Log) | Some(protocol::MessageType::Pong) => {
+                continue;
+            }
+            _ => continue,
         }
     }
-    println!("frames in 2s before action: {before}");
+}
 
-    println!("sending SYSTEM_ACTION {code}");
+/// Send one accessibility action request and print the result JSON.
+fn cmd_accessibility_action(cli: &Cli, port: u16) -> Result<()> {
+    let raw = cli
+        .accessibility_action
+        .as_deref()
+        .context("--accessibility-action requires JSON")?;
+    let payload = accessibility_action_payload(raw)?;
+
+    let mut forward: Option<usbmux::UsbForward> = None;
+    let mut stream = establish(cli, port, &mut forward)?;
+    stream.set_nodelay(true).ok();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(6))).ok();
+
+    let ack = protocol::handshake(&mut stream, HOST_VERSION).context("handshake failed")?;
+    if !ack.capabilities.accessibility {
+        bail!("the phone side is not advertising accessibility support; install a matching ioscpy device package and respring");
+    }
+
+    protocol::write_frame(
+        &mut stream,
+        protocol::MessageType::AccessibilityAction,
+        protocol::CHANNEL_CONTROL,
+        1,
+        &payload,
+    )?;
+
+    loop {
+        let frame = protocol::read_frame(&mut stream)?;
+        match frame.message_type() {
+            Some(protocol::MessageType::AccessibilityActionResult) => {
+                println!("{}", String::from_utf8_lossy(&frame.payload));
+                return Ok(());
+            }
+            Some(protocol::MessageType::Error) => {
+                println!("{}", String::from_utf8_lossy(&frame.payload));
+                return Ok(());
+            }
+            Some(protocol::MessageType::Log) | Some(protocol::MessageType::Pong) => {
+                continue;
+            }
+            _ => continue,
+        }
+    }
+}
+
+fn accessibility_action_payload(raw: &str) -> Result<Vec<u8>> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(raw).context("--accessibility-action must be valid JSON")?;
+    let object = value
+        .as_object_mut()
+        .context("--accessibility-action must be a JSON object")?;
+    object
+        .entry("schema".to_string())
+        .or_insert_with(|| serde_json::Value::String("ioscpy.accessibility.action.v1".to_string()));
+    Ok(serde_json::to_vec(&value)?)
+}
+
+/// Send one system action and exit without taking video ownership.
+fn cmd_action(cli: &Cli, port: u16, code: u16) -> Result<()> {
+    let mut forward: Option<usbmux::UsbForward> = None;
+    let mut stream = establish(cli, port, &mut forward)?;
+    stream.set_nodelay(true).ok();
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(6))).ok();
+
+    let ack = protocol::handshake(&mut stream, HOST_VERSION).context("handshake failed")?;
+    if ack.capabilities.input_backends.is_empty() {
+        bail!("the phone side is not advertising an input backend; make sure ioscpyhook is loaded");
+    }
     protocol::write_frame(
         &mut stream,
         protocol::MessageType::SystemAction,
@@ -480,27 +954,7 @@ fn cmd_action(cli: &Cli, port: u16, code: u16) -> Result<()> {
         1,
         &code.to_be_bytes(),
     )?;
-
-    // Watch for about 6s: does the stream keep flowing or drop?
-    let mut after = 0u32;
-    let t1 = Instant::now();
-    while t1.elapsed() < Duration::from_secs(6) {
-        match protocol::read_frame(&mut stream) {
-            Ok(f) => {
-                if f.message_type() == Some(protocol::MessageType::VideoFrame) {
-                    after += 1;
-                }
-            }
-            Err(e) => {
-                println!(
-                    "!! connection DROPPED {:.1}s after action: {e}",
-                    t1.elapsed().as_secs_f32()
-                );
-                return Ok(());
-            }
-        }
-    }
-    println!("connection survived; frames in 6s after action: {after}");
+    println!("sent SYSTEM_ACTION {code}");
     Ok(())
 }
 
@@ -576,4 +1030,53 @@ fn print_debug_header(cli: &Cli) {
             .or_else(|| cli.device.clone())
             .unwrap_or_else(|| "auto (single attached device)".to_string())
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accessibility_action_payload_adds_schema() {
+        let payload = accessibility_action_payload(
+            r#"{"action":"tap","frame":{"x":1,"y":2,"width":3,"height":4}}"#,
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(value["schema"], "ioscpy.accessibility.action.v1");
+        assert_eq!(value["action"], "tap");
+        assert_eq!(value["frame"]["width"], 3);
+    }
+
+    #[test]
+    fn accessibility_action_payload_preserves_schema() {
+        let payload =
+            accessibility_action_payload(r#"{"schema":"custom","action":"tap"}"#).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(value["schema"], "custom");
+    }
+
+    #[test]
+    fn accessibility_action_payload_rejects_non_object() {
+        assert!(accessibility_action_payload(r#"["tap"]"#).is_err());
+    }
+
+    #[test]
+    fn parses_normalized_coordinates() {
+        assert_eq!(parse_pair("0.25, 1").unwrap(), (0.25, 1.0));
+        assert!(parse_pair("1.2,0").is_err());
+    }
+
+    #[test]
+    fn parses_one_shot_keys() {
+        assert_eq!(
+            parse_key_code("cmd-a").unwrap() as u8,
+            protocol::KeyCode::SelectAll as u8
+        );
+        assert_eq!(
+            parse_key_code("arrow-left").unwrap() as u8,
+            protocol::KeyCode::Left as u8
+        );
+        assert!(parse_key_code("volume-up").is_err());
+    }
 }

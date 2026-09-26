@@ -32,6 +32,10 @@ never renumbered, and new messages are only appended.
 | PONG                   | 61    | both  | control | (empty)      |
 | ERROR                  | 70    | D→H   | control | JSON         |
 | LOG                    | 71    | D→H   | control | JSON         |
+| ACCESSIBILITY_SNAPSHOT | 80    | H→D   | control | JSON         |
+| ACCESSIBILITY_TREE     | 81    | D→H   | control | JSON         |
+| ACCESSIBILITY_ACTION   | 82    | H→D   | control | JSON         |
+| ACCESSIBILITY_ACTION_RESULT | 83 | D→H  | control | JSON         |
 
 In the `dir` column, H→D denotes host to daemon and D→H denotes daemon to host.
 
@@ -150,6 +154,53 @@ the host Esc key. The device performs it with Cmd+[, which UIKit treats as the
 navigation controller pop and WebKit treats as a web back, routed to the focused
 app. It therefore needs no touch and works before any physical tap.
 
+## Accessibility
+
+`ACCESSIBILITY_SNAPSHOT` asks the device side to return a JSON accessibility tree
+on the control channel as `ACCESSIBILITY_TREE`. The request payload is JSON:
+
+```json
+{
+  "max_depth": 12,
+  "max_nodes": 2000,
+  "include_hidden": false
+}
+```
+
+`ACCESSIBILITY_TREE` follows `protocol/accessibility.schema.json`. Node `id`
+values are opaque and only stable for the returned snapshot. Selectors should
+prefer semantic fields such as `label`, `value`, `role`, `identifier`, and
+`traits`, falling back to `frame` only when no semantic match exists.
+
+`ACCESSIBILITY_ACTION` carries `protocol/accessibility-action.schema.json`
+request JSON. The initial action payload shape is:
+
+```json
+{
+  "schema": "ioscpy.accessibility.action.v1",
+  "selector": { "label": "Continue", "role": "button" },
+  "action": "tap",
+  "target_id": "n42",
+  "frame": { "x": 80, "y": 412, "width": 240, "height": 44 },
+  "value": null
+}
+```
+
+The prototype action backend supports `tap` when the request includes `point`,
+`frame`, or `node.frame`. Selector-only action matching is intentionally left to
+the host until a target jailbroken iOS accessibility tree is validated. The
+device returns `ACCESSIBILITY_ACTION_RESULT` JSON on success or `ERROR` JSON on
+failure.
+
+Selector readiness is recorded outside the wire protocol by
+`protocol/accessibility-validation.schema.json`. A `selector_ready: true` summary
+must include a `protocol/accessibility-selector-proof.schema.json` artifact
+covering `find`, selector tap, `form_input`, and `get_accessibility_tree` against
+the same tree snapshot and concrete device UDID.
+
+The current prototype tree backend is intentionally capability-gated. Hosts must
+check the `accessibility` capability before relying on selector operations.
+
 ## Clipboard
 
 `CLIPBOARD_SET` (host to device) and `CLIPBOARD_CHANGED` (device to host) both
@@ -171,7 +222,7 @@ To prevent loops, each side records the FNV-1a/64 hash of the last value it sync
 {
   "role": "host",
   "host_version": "0.1.5",
-  "protocol_version": 4,
+  "protocol_version": 5,
   "nonce": "<hex>"
 }
 ```
@@ -185,7 +236,7 @@ in an `AUTHENTICATE` frame before any privileged message is honored (see below).
 ```json
 {
   "daemon_version": "0.1.5",
-  "protocol_version": 4,
+  "protocol_version": 5,
   "session_token": "<hex>",
   "capabilities": {
     "ios_version": "16.7.10",

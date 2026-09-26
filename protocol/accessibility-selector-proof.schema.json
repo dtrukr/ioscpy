@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ioscpy.local/protocol/accessibility-selector-proof.schema.json",
+  "title": "ioscpy accessibility selector readiness proof",
+  "type": "object",
+  "required": ["schema", "device_udid", "tree_snapshot_id", "generated_at", "cases"],
+  "properties": {
+    "schema": {
+      "const": "ioscpy.accessibility.selector-proof.v1"
+    },
+    "device_udid": {
+      "type": "string",
+      "minLength": 1
+    },
+    "tree_snapshot_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "notes": {
+      "type": "string"
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 4,
+      "items": { "$ref": "#/$defs/case" }
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "selector": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "id": { "type": "string" },
+        "label": { "type": "string" },
+        "value": { "type": ["string", "number", "boolean"] },
+        "hint": { "type": "string" },
+        "identifier": { "type": "string" },
+        "role": { "type": "string" },
+        "text": { "type": "string" },
+        "traits": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "case": {
+      "type": "object",
+      "required": ["tool", "ok", "selector", "matched_node_id"],
+      "properties": {
+        "tool": {
+          "type": "string",
+          "enum": ["find", "tap_selector", "form_input", "get_accessibility_tree"]
+        },
+        "ok": {
+          "const": true
+        },
+        "selector": { "$ref": "#/$defs/selector" },
+        "matched_node_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "action": {
+          "type": ["string", "null"],
+          "enum": ["tap", "set_value", null]
+        },
+        "value_before": {
+          "type": ["string", "number", "boolean", "null"]
+        },
+        "value_after": {
+          "type": ["string", "number", "boolean", "null"]
+        },
+        "evidence": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

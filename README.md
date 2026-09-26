@@ -181,6 +181,65 @@ ioscpy on Windows reuses the USB tooling an iOS setup already has, and does **no
 Pass `--mjpeg` if you prefer the MJPEG path over H.264. If `openh264` fails to
 build, confirm `nasm` is on `PATH`.
 
+## Automation and Ghostty bridge
+
+Automation callers can send one-shot input without opening the mirror window:
+
+```bash
+ioscpy --tap 0.50,0.75
+ioscpy --swipe 0.50,0.80,0.50,0.20 --duration-ms 450
+ioscpy --text "hello"
+ioscpy --key enter
+ioscpy --keyboard-mode hide
+ioscpy --clipboard-set "hello" --paste
+ioscpy --accessibility-tree
+ioscpy --accessibility-action '{"schema":"ioscpy.accessibility.action.v1","action":"tap","frame":{"x":80,"y":412,"width":240,"height":44}}'
+```
+
+Touch coordinates are normalized screen coordinates in `[0,1]`, independent of
+the device resolution. `--key` accepts `enter`, `backspace`, `tab`, `escape`,
+`left`, `right`, `up`, `down`, `select-all`, `copy`, `paste`, `cut`, and `undo`.
+`--accessibility-tree` prints the current prototype accessibility tree JSON and
+requires a matching phone-side package that advertises accessibility support.
+`--accessibility-action` accepts `protocol/accessibility-action.schema.json`
+request JSON; the prototype supports `tap` when a `point`, `frame`, or
+`node.frame` is supplied.
+
+Before enabling selector-based automation in a host integration, validate the
+prototype against a real jailbroken device:
+
+```bash
+scripts/validate-accessibility-prototype.sh --tap-first --out-dir /tmp/ioscpy-ax-validation
+```
+
+For Ghostty MCP, the combined handoff command is:
+
+```bash
+scripts/validate-accessibility-for-ghostty.sh --device <UDID> --out-dir /tmp/ioscpy-ax-validation
+```
+
+The script writes schema-checked `validation-summary.json` only after the tree
+dump and optional tap action both pass. Prototype runs record
+`selector_ready: false`, so they prove the transport without unlocking committed
+selector semantics. Promoting a run with `--selector-ready` also requires
+`--selector-proof FILE`; the proof must be
+`protocol/accessibility-selector-proof.schema.json` JSON covering `find`,
+selector tap, `form_input`, and `get_accessibility_tree` against the same tree
+snapshot. It is copied into the artifact directory and hashed in the summary.
+Selector-ready summaries also record a concrete device UDID so host integrations
+do not unlock selectors for a different iPhone. Ghostty MCP can inspect that file via
+`GHOSTTY_IPHONE_ACCESSIBILITY_VALIDATION_SUMMARY=/tmp/ioscpy-ax-validation/validation-summary.json`.
+From `webview-poc/mcp-server`, run
+`npm run check:iphone-accessibility-validation -- --summary /tmp/ioscpy-ax-validation/validation-summary.json --device <UDID>`
+to confirm Ghostty will enable selector APIs for that target.
+Use `--selector-proof-template FILE` after a successful `--tap-first` run to
+draft the proof from the captured tree; the draft starts with `ok: false` cases
+and must be filled with real device evidence before `--selector-ready` accepts it.
+After the proof is filled, rerun the handoff with
+`--selector-ready --selector-proof FILE`.
+Run `scripts/test-accessibility-validation.js` to exercise the summary gate
+locally without a phone.
+
 ## First touch
 
 > After a respring or a fresh connection, give the phone one physical tap on its

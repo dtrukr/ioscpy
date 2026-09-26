@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ioscpy.local/protocol/accessibility-validation.schema.json",
+  "title": "ioscpy accessibility validation summary",
+  "type": "object",
+  "required": ["schema", "ok", "validated_at", "tap_first", "selector_ready", "tree", "artifacts"],
+  "properties": {
+    "schema": {
+      "const": "ioscpy.accessibility.validation.v1"
+    },
+    "ok": {
+      "const": true
+    },
+    "validated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "tap_first": {
+      "type": "boolean"
+    },
+    "selector_ready": {
+      "type": "boolean",
+      "description": "True only when the run validates committed MCP selector semantics, not just prototype tree/action transport."
+    },
+    "selector_proof": {
+      "type": ["object", "null"],
+      "required": ["file", "schema", "sha256", "bytes"],
+      "properties": {
+        "file": { "type": "string" },
+        "schema": { "const": "ioscpy.accessibility.selector-proof.v1" },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "device_udid": {
+      "type": ["string", "null"]
+    },
+    "tree": {
+      "type": "object",
+      "required": ["schema", "source", "node_count", "truncated"],
+      "properties": {
+        "schema": {
+          "const": "ioscpy.accessibility.v1"
+        },
+        "source": {
+          "type": "string"
+        },
+        "snapshot_id": {
+          "type": ["string", "null"]
+        },
+        "node_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "host_application": {
+          "type": ["object", "null"],
+          "additionalProperties": true
+        },
+        "screen": {
+          "type": ["object", "null"],
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "action": {
+      "type": ["object", "null"],
+      "required": ["schema", "ok", "action"],
+      "properties": {
+        "schema": {
+          "const": "ioscpy.accessibility.action-result.v1"
+        },
+        "ok": {
+          "const": true
+        },
+        "action": {
+          "type": ["string", "null"]
+        },
+        "target_id": {
+          "type": ["string", "null"]
+        },
+        "point": {
+          "type": ["object", "null"],
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "artifacts": {
+      "type": "object",
+      "required": ["devices", "debug", "tree"],
+      "properties": {
+        "devices": { "type": "string" },
+        "debug": { "type": "string" },
+        "tree": { "type": "string" },
+        "action_request": { "type": ["string", "null"] },
+        "action_result": { "type": ["string", "null"] },
+        "selector_proof": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "selector_ready": { "const": true }
+        },
+        "required": ["selector_ready"]
+      },
+      "then": {
+        "required": ["action", "selector_proof"],
+        "properties": {
+          "tap_first": { "const": true },
+          "device_udid": { "type": "string", "minLength": 1 },
+          "action": { "type": "object" },
+          "selector_proof": { "type": "object" }
+        }
+      }
+    }
+  ]
+}

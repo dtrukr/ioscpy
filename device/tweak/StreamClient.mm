@@ -4,6 +4,7 @@
 #import "Protocol.h"
 #import "InputInjector.h"
 #import "KeyboardSuppression.h"
+#import "AccessibilityDump.h"
 
 #import <sys/socket.h>
 #import <netinet/in.h>
@@ -25,6 +26,87 @@ static BOOL gHaveHash = NO;
 static NSInteger gLastSeenChangeCount = -1;
 static NSInteger gSuppressUntilChangeCount = -1;
 
+static NSDictionary *IOSPYJSONError(NSString *code, NSString *message) {
+    return @{
+        @"code": code ?: @"ERROR",
+        @"component": @"ioscpyhook",
+        @"fatal": @NO,
+        @"message": message ?: @"",
+        @"suggestion": @"",
+    };
+}
+
+static void IOSPYSendJSONFrame(int fd, IOSPYMessageType type, NSDictionary *object) {
+    if (fd < 0) {
+        return;
+    }
+    NSError *error = nil;
+    NSData *body = [NSJSONSerialization dataWithJSONObject:object options:0 error:&error];
+    if (!body) {
+        NSLog(@"[ioscpyhook] JSON encode failed: %@", error);
+        return;
+    }
+    IOSPYWriteFrame(fd, type, IOSPY_CHANNEL_CONTROL, 0, body);
+}
+
+static NSDictionary *IOSPYDictionaryValue(id value) {
+    return [value isKindOfClass:[NSDictionary class]] ? value : nil;
+}
+
+static NSNumber *IOSPYNumberValue(id value) {
+    return [value respondsToSelector:@selector(doubleValue)] ? value : nil;
+}
+
+static BOOL IOSPYNormalizedPointFromAction(NSDictionary *request, CGFloat *outX, CGFloat *outY) {
+    NSDictionary *point = IOSPYDictionaryValue(request[@"point"]);
+    if (point) {
+        NSNumber *xNumber = IOSPYNumberValue(point[@"x"]);
+        NSNumber *yNumber = IOSPYNumberValue(point[@"y"]);
+        if (!xNumber || !yNumber) {
+            return NO;
+        }
+        CGFloat x = xNumber.doubleValue;
+        CGFloat y = yNumber.doubleValue;
+        NSString *space = [point[@"coordinate_space"] isKindOfClass:[NSString class]]
+            ? [point[@"coordinate_space"] lowercaseString]
+            : @"screen-points";
+        if ([space isEqualToString:@"normalized"] || [space isEqualToString:@"iphone-normalized"]) {
+            *outX = fmax(0.0, fmin(1.0, x));
+            *outY = fmax(0.0, fmin(1.0, y));
+            return YES;
+        }
+
+        CGSize size = UIScreen.mainScreen.bounds.size;
+        *outX = fmax(0.0, fmin(1.0, x / fmax(1.0, size.width)));
+        *outY = fmax(0.0, fmin(1.0, y / fmax(1.0, size.height)));
+        return YES;
+    }
+
+    NSDictionary *frame = IOSPYDictionaryValue(request[@"frame"]);
+    if (!frame) {
+        NSDictionary *node = IOSPYDictionaryValue(request[@"node"]);
+        frame = IOSPYDictionaryValue(node[@"frame"]);
+    }
+    if (!frame) {
+        return NO;
+    }
+
+    NSNumber *xNumber = IOSPYNumberValue(frame[@"x"]);
+    NSNumber *yNumber = IOSPYNumberValue(frame[@"y"]);
+    NSNumber *widthNumber = IOSPYNumberValue(frame[@"width"]);
+    NSNumber *heightNumber = IOSPYNumberValue(frame[@"height"]);
+    if (!xNumber || !yNumber || !widthNumber || !heightNumber) {
+        return NO;
+    }
+
+    CGSize size = UIScreen.mainScreen.bounds.size;
+    CGFloat x = xNumber.doubleValue + (widthNumber.doubleValue / 2.0);
+    CGFloat y = yNumber.doubleValue + (heightNumber.doubleValue / 2.0);
+    *outX = fmax(0.0, fmin(1.0, x / fmax(1.0, size.width)));
+    *outY = fmax(0.0, fmin(1.0, y / fmax(1.0, size.height)));
+    return YES;
+}
+
 static uint64_t clipHash(NSString *t) {
     NSData *d = [t dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data];
     uint64_t h = 1469598103934665603ULL;
@@ -41,6 +123,7 @@ static uint64_t clipHash(NSString *t) {
 - (void)checkClipboard;
 - (void)applyRemoteClipboard:(NSString *)text paste:(BOOL)paste;
 - (void)sendClipboardChanged:(NSString *)text;
+- (void)performAccessibilityAction:(NSData *)payload;
 @end
 
 @implementation IOSPYStreamClient {
@@ -258,9 +341,69 @@ static uint64_t clipHash(NSString *t) {
             // the flag there) and only touched from main, so no races.
             BOOL on = ((const uint8_t *)payload.bytes)[0] != 0;
             dispatch_async(dispatch_get_main_queue(), ^{ IOSPYSetKeyboardSuppressed(on); });
+        } else if (header.type == IOSPYMsgAccessibilitySnapshot) {
+            NSData *tree = IOSPYAccessibilityTreeJSON(payload);
+            IOSPYWriteFrame(_fd, IOSPYMsgAccessibilityTree, IOSPY_CHANNEL_CONTROL, 0, tree);
+        } else if (header.type == IOSPYMsgAccessibilityAction) {
+            [self performAccessibilityAction:payload];
         }
       }
     }
+}
+
+- (void)performAccessibilityAction:(NSData *)payload {
+    NSError *error = nil;
+    NSDictionary *request = payload.length > 0
+        ? [NSJSONSerialization JSONObjectWithData:payload options:0 error:&error]
+        : nil;
+    if (![request isKindOfClass:[NSDictionary class]]) {
+        IOSPYSendJSONFrame(_fd, IOSPYMsgError,
+                           IOSPYJSONError(@"BAD_ACCESSIBILITY_ACTION",
+                                          @"accessibility action payload must be a JSON object"));
+        return;
+    }
+
+    NSString *action = [request[@"action"] isKindOfClass:[NSString class]]
+        ? [request[@"action"] lowercaseString]
+        : @"";
+    if (![action isEqualToString:@"tap"]) {
+        IOSPYSendJSONFrame(_fd, IOSPYMsgError,
+                           IOSPYJSONError(@"UNSUPPORTED_ACCESSIBILITY_ACTION",
+                                          @"only tap is implemented in the prototype accessibility action backend"));
+        return;
+    }
+
+    CGFloat x = 0.0;
+    CGFloat y = 0.0;
+    if (!IOSPYNormalizedPointFromAction(request, &x, &y)) {
+        IOSPYSendJSONFrame(_fd, IOSPYMsgError,
+                           IOSPYJSONError(@"UNRESOLVED_ACCESSIBILITY_TARGET",
+                                          @"tap action requires point, frame, or node.frame; selector-only actions are host-resolved for this prototype"));
+        return;
+    }
+
+    NSString *targetID = [request[@"target_id"] isKindOfClass:[NSString class]]
+        ? request[@"target_id"]
+        : nil;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        IOSPYInjectTouch(IOSPYTouchDown, 0, x, y);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(35 * NSEC_PER_MSEC)),
+                       dispatch_get_main_queue(), ^{
+            IOSPYInjectTouch(IOSPYTouchUp, 0, x, y);
+            IOSPYSendJSONFrame(_fd, IOSPYMsgAccessibilityActionResult, @{
+                @"schema": @"ioscpy.accessibility.action-result.v1",
+                @"ok": @YES,
+                @"action": action,
+                @"message": @"",
+                @"point": @{
+                    @"x": @(x),
+                    @"y": @(y),
+                    @"coordinate_space": @"normalized",
+                },
+                @"target_id": targetID ?: (id)kCFNull,
+            });
+        });
+    });
 }
 
 // everything below runs on _captureQueue

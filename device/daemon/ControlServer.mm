@@ -12,18 +12,23 @@
 #import <arpa/inet.h>
 #import <unistd.h>
 #import <errno.h>
+#import <dispatch/dispatch.h>
 
 NSString *const IOSPYDaemonVersion = @"0.1.5";
 
 @implementation IOSPYControlServer {
     uint16_t _port;
     int _listenFd;
+    int _streamOwnerFd;
+    int _replyOwnerFd;
 }
 
 - (instancetype)initWithPort:(uint16_t)port {
     if ((self = [super init])) {
         _port = port;
         _listenFd = -1;
+        _streamOwnerFd = -1;
+        _replyOwnerFd = -1;
     }
     return self;
 }
@@ -88,8 +93,11 @@ NSString *const IOSPYDaemonVersion = @"0.1.5";
         // a backlog build up on the wire.
         int sndbuf = 256 * 1024;
         setsockopt(client, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
-        [self handleClient:client];
-        close(client);
+
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            [self handleClient:client];
+            close(client);
+        });
     }
 }
 
@@ -111,8 +119,6 @@ NSString *const IOSPYDaemonVersion = @"0.1.5";
     // Serialize every write to this socket: control replies run on this read
     // thread while video frames come from the pump thread.
     NSLock *writeLock = [[NSLock alloc] init];
-    // Let the frame ingest relay tweak->host frames (clipboard) on this socket.
-    [[IOSPYFrameIngest shared] setHostFd:fd writeLock:writeLock];
     // Per-connection secret the host must echo before we honor any privileged
     // message. Tied to this socket only, a new connection gets a fresh one.
     NSString *sessionToken = [self randomToken];
@@ -128,6 +134,8 @@ NSString *const IOSPYDaemonVersion = @"0.1.5";
 
     __block BOOL alive = YES;
     __block BOOL streaming = NO;
+    BOOL ownsStream = NO;
+    BOOL ownsReplyChannel = NO;
     dispatch_semaphore_t pumpDone = NULL;
 
     BOOL connected = YES;
@@ -169,6 +177,23 @@ NSString *const IOSPYDaemonVersion = @"0.1.5";
             }
             case IOSPYMsgStartStream:
                 if (!streaming) {
+                    BOOL acquiredStream = NO;
+                    @synchronized (self) {
+                        if (_replyOwnerFd < 0 && (_streamOwnerFd < 0 || _streamOwnerFd == fd)) {
+                            _streamOwnerFd = fd;
+                            acquiredStream = YES;
+                        }
+                    }
+                    if (!acquiredStream) {
+                        [writeLock lock];
+                        [self sendError:fd code:@"STREAM_BUSY" fatal:YES
+                                message:@"ioscpyd already has a video stream owner; keep that Ghostty/ioscpy session open and send input through a control-only client"];
+                        [writeLock unlock];
+                        connected = NO;
+                        break;
+                    }
+                    ownsStream = YES;
+                    [[IOSPYFrameIngest shared] setHostFd:fd writeLock:writeLock];
                     // 1-byte payload picks the codec (0/empty = MJPEG, 1 = H.264).
                     uint8_t codec = (payload.length >= 1) ? ((const uint8_t *)payload.bytes)[0] : 0;
                     BOOL h264 = (codec == IOSPY_VIDEO_CODEC_H264);
@@ -213,16 +238,25 @@ NSString *const IOSPYDaemonVersion = @"0.1.5";
                 }
                 break;
             case IOSPYMsgStopStream:
-                if (streaming) {
+                if (streaming && ownsStream) {
                     streaming = NO;
                     [[IOSPYFrameIngest shared] setVideoReliable:NO];
+                    [[IOSPYFrameIngest shared] setHostFd:-1 writeLock:nil];
                     [[IOSPYFrameIngest shared] tellTweakStop];
+                    @synchronized (self) {
+                        if (_streamOwnerFd == fd) {
+                            _streamOwnerFd = -1;
+                        }
+                    }
+                    ownsStream = NO;
                     NSLog(@"[ioscpyd] stream stopped");
                 }
                 break;
             case IOSPYMsgRequestKeyframe:
                 // Host wants a fresh keyframe, e.g. it just connected mid-stream.
-                [[IOSPYFrameIngest shared] forwardToTweak:hdr.type payload:payload];
+                if (ownsStream) {
+                    [[IOSPYFrameIngest shared] forwardToTweak:hdr.type payload:payload];
+                }
                 break;
             case IOSPYMsgInputTouch:
             case IOSPYMsgInputKey:
@@ -241,6 +275,48 @@ NSString *const IOSPYDaemonVersion = @"0.1.5";
                 }
                 [[IOSPYFrameIngest shared] forwardToTweak:hdr.type payload:payload];
                 break;
+            case IOSPYMsgAccessibilitySnapshot:
+            case IOSPYMsgAccessibilityAction:
+                if (!authenticated) {
+                    [writeLock lock];
+                    [self sendError:fd code:@"UNAUTHENTICATED" fatal:NO
+                            message:@"authenticate before sending accessibility requests"];
+                    [writeLock unlock];
+                    break;
+                }
+                if (ownsStream) {
+                    BOOL replyBusy;
+                    @synchronized (self) {
+                        replyBusy = _replyOwnerFd >= 0;
+                    }
+                    if (replyBusy) {
+                        [writeLock lock];
+                        [self sendError:fd code:@"REPLY_BUSY" fatal:NO
+                                message:@"another accessibility request is active"];
+                        [writeLock unlock];
+                        break;
+                    }
+                } else if (!ownsReplyChannel) {
+                    BOOL acquiredReplyChannel = NO;
+                    @synchronized (self) {
+                        if (_replyOwnerFd < 0 || _replyOwnerFd == fd) {
+                            _replyOwnerFd = fd;
+                            acquiredReplyChannel = YES;
+                        }
+                    }
+                    if (!acquiredReplyChannel) {
+                        [writeLock lock];
+                        [self sendError:fd code:@"REPLY_BUSY" fatal:YES
+                                message:@"ioscpyd already has an accessibility reply owner"];
+                        [writeLock unlock];
+                        connected = NO;
+                        break;
+                    }
+                    ownsReplyChannel = YES;
+                    [[IOSPYFrameIngest shared] setReplyFd:fd writeLock:writeLock];
+                }
+                [[IOSPYFrameIngest shared] forwardToTweak:hdr.type payload:payload];
+                break;
             default:
                 break;
         }
@@ -249,15 +325,29 @@ NSString *const IOSPYDaemonVersion = @"0.1.5";
 
     // Client gone: stop the pump and wait for it before closing the socket.
     alive = NO;
-    streaming = NO;
-    [[IOSPYFrameIngest shared] setVideoReliable:NO];
-    [[IOSPYFrameIngest shared] setHostFd:-1 writeLock:nil];
-    [[IOSPYFrameIngest shared] tellTweakStop];
-    // Restore the on-screen keyboard in case this session hid it. Covers an
-    // abrupt host loss (kill -9, cable pull) where no explicit disable arrives.
-    uint8_t keyboardOff = 0;
-    [[IOSPYFrameIngest shared] forwardToTweak:IOSPYMsgKeyboardMode
-                                      payload:[NSData dataWithBytes:&keyboardOff length:1]];
+    if (ownsStream) {
+        streaming = NO;
+        [[IOSPYFrameIngest shared] setVideoReliable:NO];
+        [[IOSPYFrameIngest shared] setHostFd:-1 writeLock:nil];
+        [[IOSPYFrameIngest shared] tellTweakStop];
+        @synchronized (self) {
+            if (_streamOwnerFd == fd) {
+                _streamOwnerFd = -1;
+            }
+        }
+        // Restore the on-screen keyboard in case this session hid it. Covers an
+        // abrupt host loss (kill -9, cable pull) where no explicit disable arrives.
+        uint8_t keyboardOff = 0;
+        [[IOSPYFrameIngest shared] forwardToTweak:IOSPYMsgKeyboardMode
+                                          payload:[NSData dataWithBytes:&keyboardOff length:1]];
+    } else if (ownsReplyChannel) {
+        [[IOSPYFrameIngest shared] setReplyFd:-1 writeLock:nil];
+        @synchronized (self) {
+            if (_replyOwnerFd == fd) {
+                _replyOwnerFd = -1;
+            }
+        }
+    }
     if (pumpDone) {
         dispatch_semaphore_wait(pumpDone,
                                 dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)));
@@ -282,6 +372,7 @@ NSString *const IOSPYDaemonVersion = @"0.1.5";
         @"clipboard": @([[IOSPYFrameIngest shared] tweakConnected]),
         @"keyboard": @([[IOSPYFrameIngest shared] tweakConnected]),
         @"orientation": @NO,
+        @"accessibility": @([[IOSPYFrameIngest shared] tweakConnected]),
     };
 }
 

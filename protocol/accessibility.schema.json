@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ioscpy.local/protocol/accessibility.schema.json",
+  "title": "ioscpy accessibility tree",
+  "type": "object",
+  "required": ["schema", "source", "snapshot_id", "nodes"],
+  "properties": {
+    "schema": {
+      "const": "ioscpy.accessibility.v1"
+    },
+    "source": {
+      "type": "string",
+      "description": "Backend that produced the tree, for example springboard-uikit-prototype or ax-private."
+    },
+    "snapshot_id": {
+      "type": "string"
+    },
+    "timestamp_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "focused_application": {
+      "type": ["object", "null"],
+      "properties": {
+        "bundle_id": { "type": ["string", "null"] },
+        "name": { "type": ["string", "null"] },
+        "pid": { "type": ["integer", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "host_application": {
+      "type": ["object", "null"],
+      "description": "Process that produced the snapshot. For the first prototype this is usually SpringBoard, not necessarily the foreground app.",
+      "properties": {
+        "bundle_id": { "type": ["string", "null"] },
+        "name": { "type": ["string", "null"] },
+        "pid": { "type": ["integer", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "screen": {
+      "type": ["object", "null"],
+      "properties": {
+        "width": { "type": "number" },
+        "height": { "type": "number" },
+        "scale": { "type": "number" },
+        "orientation": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "nodes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/node" }
+    },
+    "truncated": {
+      "type": "boolean",
+      "description": "True when the producer stopped after the requested or default max_nodes cap."
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "rect": {
+      "type": "object",
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "width": { "type": "number" },
+        "height": { "type": "number" }
+      },
+      "additionalProperties": false
+    },
+    "node": {
+      "type": "object",
+      "required": ["id", "role", "frame", "children"],
+      "properties": {
+        "id": { "type": "string" },
+        "parent_id": { "type": ["string", "null"] },
+        "role": { "type": "string" },
+        "label": { "type": ["string", "null"] },
+        "value": { "type": ["string", "number", "boolean", "null"] },
+        "hint": { "type": ["string", "null"] },
+        "identifier": { "type": ["string", "null"] },
+        "traits": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "enabled": { "type": "boolean" },
+        "hidden": { "type": "boolean" },
+        "focused": { "type": "boolean" },
+        "frame": { "$ref": "#/$defs/rect" },
+        "path": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 }
+        },
+        "class": { "type": "string" },
+        "is_accessibility_element": { "type": "boolean" },
+        "source_kind": {
+          "type": "string",
+          "enum": ["view", "accessibilityElement"]
+        },
+        "children": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

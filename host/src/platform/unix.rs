@@ -1,15 +1,24 @@
 //! macOS + Linux implementation of the platform seam. This reproduces the
-//! behavior the host had before the seam existed: bare tool names resolved by
-//! `Command` via PATH, the per-OS cache dir (macOS `~/Library/Caches/ioscpy`,
+//! behavior the host had before the seam existed: command-line tools, the per-OS cache dir (macOS `~/Library/Caches/ioscpy`,
 //! Linux `$XDG_CACHE_HOME`/`~/.cache`), `sw_vers`/`uname`, and the existing
 //! install hints.
 
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Return the bare name; `Command` resolves it through PATH, exactly as before.
-/// Always `Some`, so the spawn site keeps its original "fails at exec" behavior.
+/// Prefer the installed libimobiledevice tools on macOS. Other tools named
+/// `idevice_id` can appear earlier on PATH and may have different behavior.
+/// Fall back to PATH for non-Homebrew setups and on Linux.
 pub fn tool_path(name: &str) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    if matches!(name, "idevice_id" | "ideviceinfo" | "iproxy") {
+        for dir in ["/opt/homebrew/bin", "/usr/local/bin"] {
+            let path = PathBuf::from(dir).join(name);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
     Some(PathBuf::from(name))
 }
 

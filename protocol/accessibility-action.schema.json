@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ioscpy.local/protocol/accessibility-action.schema.json",
+  "title": "ioscpy accessibility action",
+  "oneOf": [
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/result" }
+  ],
+  "$defs": {
+    "rect": {
+      "type": "object",
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "width": { "type": "number" },
+        "height": { "type": "number" }
+      },
+      "additionalProperties": false
+    },
+    "point": {
+      "type": "object",
+      "required": ["x", "y"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "coordinate_space": {
+          "type": "string",
+          "enum": ["screen-points", "normalized", "iphone-normalized"]
+        }
+      },
+      "additionalProperties": true
+    },
+    "selector": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "label": { "type": "string" },
+        "value": { "type": ["string", "number", "boolean"] },
+        "hint": { "type": "string" },
+        "identifier": { "type": "string" },
+        "role": { "type": "string" },
+        "text": { "type": "string" },
+        "traits": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "request": {
+      "type": "object",
+      "required": ["schema", "action"],
+      "properties": {
+        "schema": { "const": "ioscpy.accessibility.action.v1" },
+        "action": {
+          "type": "string",
+          "enum": ["tap", "set_value", "focus", "activate", "increment", "decrement"]
+        },
+        "selector": { "$ref": "#/$defs/selector" },
+        "target_id": { "type": ["string", "null"] },
+        "point": { "$ref": "#/$defs/point" },
+        "frame": { "$ref": "#/$defs/rect" },
+        "node": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string" },
+            "frame": { "$ref": "#/$defs/rect" }
+          },
+          "additionalProperties": true
+        },
+        "value": { "type": ["string", "number", "boolean", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "result": {
+      "type": "object",
+      "required": ["schema", "ok", "action"],
+      "properties": {
+        "schema": { "const": "ioscpy.accessibility.action-result.v1" },
+        "ok": { "type": "boolean" },
+        "action": { "type": "string" },
+        "message": { "type": "string" },
+        "target_id": { "type": ["string", "null"] },
+        "point": { "$ref": "#/$defs/point" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

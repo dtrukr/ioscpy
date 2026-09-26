@@ -6,7 +6,7 @@ use std::io::{self, Read, Write};
 use serde::{Deserialize, Serialize};
 
 pub const MAGIC: u32 = 0x4943_5059; // "ICPY"
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 pub const HEADER_SIZE: usize = 32;
 pub const DEFAULT_PORT: u16 = 27183;
 pub const MAX_PAYLOAD: u32 = 16 * 1024 * 1024;
@@ -71,6 +71,10 @@ pub enum MessageType {
     Pong = 61,
     Error = 70,
     Log = 71,
+    AccessibilitySnapshot = 80,
+    AccessibilityTree = 81,
+    AccessibilityAction = 82,
+    AccessibilityActionResult = 83,
 }
 
 impl MessageType {
@@ -100,6 +104,10 @@ impl MessageType {
             61 => Pong,
             70 => Error,
             71 => Log,
+            80 => AccessibilitySnapshot,
+            81 => AccessibilityTree,
+            82 => AccessibilityAction,
+            83 => AccessibilityActionResult,
             _ => return None,
         })
     }
@@ -107,7 +115,7 @@ impl MessageType {
 
 /// Fixed 32-byte frame header. Every field is on the wire even though routing
 /// only uses some of them today.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub struct FrameHeader {
     pub version: u16,
@@ -266,10 +274,12 @@ pub struct Capabilities {
     pub keyboard: bool,
     #[serde(default)]
     pub orientation: bool,
+    #[serde(default)]
+    pub accessibility: bool,
 }
 
 /// Touch phase, the first byte of an INPUT_TOUCH payload.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TouchPhase {
     Down = 0,
@@ -506,7 +516,7 @@ mod tests {
 
     #[test]
     fn message_type_roundtrip() {
-        for v in [1u16, 2, 5, 12, 13, 50, 60, 61, 70, 71] {
+        for v in [1u16, 2, 5, 12, 13, 50, 60, 61, 70, 71, 80, 81, 82, 83] {
             let mt = MessageType::from_u16(v).unwrap();
             assert_eq!(mt as u16, v);
         }

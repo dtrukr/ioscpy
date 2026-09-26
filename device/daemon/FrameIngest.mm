@@ -16,6 +16,8 @@
     NSLock *_writeLock; // guards _tweakFd and writes to it
     int _hostFd;        // the control server's host socket, -1 when none
     NSLock *_hostLock;  // the control server's per-connection write lock
+    int _replyFd;       // the accessibility requester's socket, -1 when none
+    NSLock *_replyLock;
     BOOL _videoReliable; // YES while an H.264 stream needs in-order delivery
 }
 
@@ -34,6 +36,7 @@
         _tweakFd = -1;
         _writeLock = [[NSLock alloc] init];
         _hostFd = -1;
+        _replyFd = -1;
     }
     return self;
 }
@@ -42,6 +45,13 @@
     @synchronized(self) {
         _hostFd = fd;
         _hostLock = lock;
+    }
+}
+
+- (void)setReplyFd:(int)fd writeLock:(NSLock *)lock {
+    @synchronized(self) {
+        _replyFd = fd;
+        _replyLock = lock;
     }
 }
 
@@ -150,21 +160,34 @@
                     // MJPEG: keep only the latest frame, the pump drops stale ones.
                     [[IOSPYFrameStore shared] setPayload:payload];
                 }
-            } else if (header.type == IOSPYMsgClipboardChanged) {
-                // Relay tweak->host (e.g. device clipboard changed) on the host's
-                // control socket, serialized with the video pump's writes.
+            } else if (header.type == IOSPYMsgClipboardChanged ||
+                       header.type == IOSPYMsgAccessibilityTree ||
+                       header.type == IOSPYMsgAccessibilityActionResult ||
+                       header.type == IOSPYMsgError ||
+                       header.type == IOSPYMsgLog) {
+                // Accessibility replies use their requester's socket when a
+                // control-only client is active. Other control frames belong
+                // to the video owner.
+                BOOL accessibilityReply =
+                    header.type == IOSPYMsgAccessibilityTree ||
+                    header.type == IOSPYMsgAccessibilityActionResult;
                 int hostFd;
                 NSLock *hostLock;
                 @synchronized(self) {
-                    hostFd = _hostFd;
-                    hostLock = _hostLock;
+                    hostFd = accessibilityReply && _replyFd >= 0 ? _replyFd : _hostFd;
+                    hostLock = accessibilityReply && _replyFd >= 0 ? _replyLock : _hostLock;
                 }
                 if (hostFd >= 0 && hostLock) {
                     [hostLock lock];
-                    // Non-blocking: a clipboard frame is best-effort, not worth
-                    // stalling the ingest thread (and the tweak behind it) over.
-                    IOSPYTryWriteFrame(hostFd, IOSPYMsgClipboardChanged, IOSPY_CHANNEL_CONTROL, 0,
-                                       payload);
+                    if (accessibilityReply) {
+                        // Snapshot payloads can exceed the socket buffer. The
+                        // requester is waiting for this complete response.
+                        IOSPYWriteFrame(hostFd, (IOSPYMessageType)header.type,
+                                        IOSPY_CHANNEL_CONTROL, 0, payload);
+                    } else {
+                        IOSPYTryWriteFrame(hostFd, (IOSPYMessageType)header.type,
+                                           IOSPY_CHANNEL_CONTROL, 0, payload);
+                    }
                     [hostLock unlock];
                 }
             }
