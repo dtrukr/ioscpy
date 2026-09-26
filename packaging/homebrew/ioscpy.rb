@@ -1,9 +1,10 @@
 class Ioscpy < Formula
   desc "Mirror and control a jailbroken iPhone from macOS over USB or SSH"
   homepage "https://github.com/dtrukr/ioscpy"
-  url "https://github.com/dtrukr/ioscpy/archive/adc25a45c696c07b55d17b2170a532133ac02113.tar.gz"
+  url "https://github.com/dtrukr/ioscpy/archive/01d5f50432a22b1015a804fa59c61e5cec895667.tar.gz"
   version "0.1.7"
-  sha256 "1481968c41d18ee0e6e2a48d2af1cefbe035e91aad1cb9ad873edc1400de5e55"
+  sha256 "11c43a0119bec3fb2f58fbf82a0446713419ecc12171c8a4de6951ba55c3073e"
+  revision 1
   license "MIT"
   head "https://github.com/dtrukr/ioscpy.git", branch: "main"
 
