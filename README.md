@@ -1,5 +1,10 @@
 # ioscpy
 
+This is [Dennis's public fork](https://github.com/dtrukr/ioscpy) of
+[lautarovculic/ioscpy](https://github.com/lautarovculic/ioscpy). It adds the
+Ghostty bridge, accessibility prototype, and tested iOS 18.7.1 support. Its
+host and phone package use protocol 5 and must be installed together.
+
 ## ToDo
 - [ ] https://github.com/lautarovculic/ioscpy/issues/7
 - [ ] Screen Recording (showing status) button in sidepanel.
@@ -18,27 +23,32 @@ With one device attached, that is all you need. It connects on its own.
 
 ## Install
 
-There are two sides. The Mac app runs the mirror, the iPhone package lets the
-phone be controlled. Install both.
+There are two sides. Build and install both from this fork. The upstream
+Homebrew tap and Sileo repository currently ship protocol 4 and cannot be mixed
+with this fork's protocol 5.
 
-On the Mac, with Homebrew:
+On macOS, install Rust, libimobiledevice, Theos, and the iPhoneOS SDK. Then:
 
 ```bash
-brew tap lautarovculic/ioscpy   # the Mac app
-brew trust lautarovculic/ioscpy
-brew install ioscpy
+git clone https://github.com/dtrukr/ioscpy.git
+cd ioscpy
+brew install libimobiledevice
+make host-release
+make install-host PREFIX="$(brew --prefix)"
 ioscpy --version
 ```
 
-On the jailbroken iPhone, add this repository in Sileo or Zebra, then install
-ioscpy from it and respring:
+Build the matching device package on the Mac:
 
-```text
-https://lautarovculic.github.io/ioscpy-repo/
+```bash
+make device-rootless THEOS="$HOME/theos"  # Dopamine / palera1n rootless
+# or: make device-rootful THEOS="$HOME/theos"  # palera1n rootful
 ```
 
-The repository carries both rootless and rootful builds, and the package manager
-picks the one that matches the jailbreak.
+Install the generated `device/packages/*.deb` with `dpkg -i` on the jailbroken
+phone, then respring. See [device packaging](device/packaging/README.md) for the
+package variants and [deployment scripts](scripts/install-device.sh) for a USB
+SSH workflow.
 
 ```bash
 ioscpy --device <UDID>   # pick a device when several are attached
@@ -51,8 +61,8 @@ ioscpy --version
 
 ## Linux
 
-There is no prebuilt for Linux yet. Build the host from source. The device
-package is the same as on macOS, installed from the Sileo/Zebra repo above.
+There is no prebuilt for Linux yet. Build the host from source and use the
+matching phone package built from this fork.
 
 Clone this repo, then run the installer:
 
@@ -142,7 +152,8 @@ titlebar. Pass `--wayland` to stay on native Wayland instead.
 
 ## Windows
 
-There is no prebuilt for Windows yet. Build the host from source. The device package is the same as on macOS and Linux, installed from the Sileo/Zebra repo.
+There is no prebuilt for Windows yet. Build the host from source and use the
+matching phone package built from this fork.
 
 ioscpy on Windows reuses the USB tooling an iOS setup already has, and does **not** replace any driver, so Frida, objection, grapefruit, ideviceinfo, iTunes, and any other usbmux tool keep working while it runs.
 
@@ -172,7 +183,7 @@ ioscpy on Windows reuses the USB tooling an iOS setup already has, and does **no
 
 ### 3. Build and run
 
-    git clone https://github.com/lautarovculic/ioscpy
+    git clone https://github.com/dtrukr/ioscpy
     cd ioscpy
     cargo build --release --manifest-path host/Cargo.toml
     .\host\target\release\ioscpy.exe --list      # confirms the device is seen
