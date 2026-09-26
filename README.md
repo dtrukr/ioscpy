@@ -2,7 +2,8 @@
 
 This is [Dennis's public fork](https://github.com/dtrukr/ioscpy) of
 [lautarovculic/ioscpy](https://github.com/lautarovculic/ioscpy). It adds the
-Ghostty bridge, accessibility prototype, and tested iOS 18.7.1 support. Its
+Ghostty bridge, SSH access to a phone connected to another Mac, an accessibility
+prototype, and tested iOS 18.7.1 support. Its
 host and phone package use protocol 5 and must be installed together.
 
 ## ToDo
@@ -13,7 +14,8 @@ host and phone package use protocol 5 and must be installed together.
 - [ ] Make `ioscpy` wireless (BLE, Wi-Fi) (Reserved, Author will implement this fully)
 - [ ] Custom Buttons Actions (Macros) (In phases, concept coming soon)
 
-A macOS, Linux, and Windows CLI that mirrors and controls a jailbroken iPhone over USB.
+A macOS, Linux, and Windows CLI that mirrors and controls a jailbroken iPhone.
+The macOS host also supports a USB iPhone on another Mac over SSH.
 
 With one device attached, that is all you need. It connects on its own.
 
@@ -64,7 +66,9 @@ make install-host PREFIX="$(brew --prefix)"
 ioscpy --version
 ```
 
-Build the matching device package on the Mac:
+The matching rootless device package is available in the
+[v0.1.6 release](https://github.com/dtrukr/ioscpy/releases/tag/v0.1.6).
+To build it yourself instead:
 
 ```bash
 make device-rootless THEOS="$HOME/theos"  # Dopamine / palera1n rootless
