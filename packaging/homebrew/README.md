@@ -6,15 +6,21 @@ protocol 5 commit and uses a verified source archive checksum. The matching
 device package must also come from this fork; the upstream tap and Sileo package
 use protocol 4.
 
-Install the formula from a clone of this repository:
+Install from the published tap:
 
 ```bash
-brew install --build-from-source ./packaging/homebrew/ioscpy.rb
+brew tap dtrukr/ioscpy
+brew install dtrukr/ioscpy/ioscpy
 ioscpy --version
 ```
 
-The main [README](../../README.md) also documents a direct `make install-host`
-installation. Do not install both into the same Homebrew prefix.
+Updates use `brew upgrade dtrukr/ioscpy/ioscpy`. The main
+[README](../../README.md) also documents a direct `make install-host`
+installation. Choose one installation method per Homebrew prefix.
+
+The same formula is published in
+[dtrukr/homebrew-ioscpy](https://github.com/dtrukr/homebrew-ioscpy) and must be
+updated there whenever this copy changes.
 
 To update this formula, first push and test a fork commit. Replace the commit
 in `url`, set `version`, and compute the checksum of the exact archive:

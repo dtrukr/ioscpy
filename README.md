@@ -30,6 +30,14 @@ with this fork's protocol 5.
 On macOS, install Rust, libimobiledevice, Theos, and the iPhoneOS SDK. Then:
 
 ```bash
+brew tap dtrukr/ioscpy
+brew install dtrukr/ioscpy/ioscpy
+ioscpy --version
+```
+
+To build the host directly instead:
+
+```bash
 git clone https://github.com/dtrukr/ioscpy.git
 cd ioscpy
 brew install libimobiledevice
