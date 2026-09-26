@@ -221,6 +221,7 @@ Devices:
 | roothide | iPhone10,3 | 16.7.10 | ElleKit |
 | roothide | iPhone14 | 16.3 | ------- |
 | rootless | iPhone13 | 15.5 | ElleKit |
+| rootless (Dopamine) | iPhone12,8 | 18.7.1 | ElleKit |
 
 ioscpy is developed and tested on the devices above. I don't have a rootful device
 or every iOS version on hand, so coverage by layout is incomplete:

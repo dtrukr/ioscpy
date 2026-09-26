@@ -10,6 +10,11 @@ IOSPYLayout IOSPYDetectLayout(void) {
     if ([prefix isEqualToString:@"/var/jb"]) {
         return IOSPYLayoutRootless;
     }
+    // Dopamine's /var/jb symlink resolves to a randomized preboot path in
+    // _NSGetExecutablePath, but its installed layout is still rootless.
+    if ([fm fileExistsAtPath:@"/var/jb/.installed_dopamine"]) {
+        return IOSPYLayoutRootless;
+    }
     if (prefix.length > 0) {
         // Non-empty, non-standard prefix means a dynamic root.
         return IOSPYLayoutRoothide;

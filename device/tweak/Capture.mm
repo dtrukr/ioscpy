@@ -2,7 +2,6 @@
 #import <UIKit/UIKit.h>
 #import <IOSurface/IOSurfaceRef.h>
 #import <ImageIO/ImageIO.h>
-#import <MobileCoreServices/MobileCoreServices.h>
 #import <dlfcn.h>
 
 // The render server can blit the live display straight into an IOSurface. It's
@@ -266,7 +265,7 @@ NSData *IOSPYCaptureScreenJPEG(CGFloat maxDimension, CGFloat quality,
         double encodeStart = nowMs();
         NSMutableData *data = [NSMutableData data];
         CGImageDestinationRef dest =
-            CGImageDestinationCreateWithData((__bridge CFMutableDataRef)data, kUTTypeJPEG, 1, NULL);
+            CGImageDestinationCreateWithData((__bridge CFMutableDataRef)data, CFSTR("public.jpeg"), 1, NULL);
         BOOL ok = NO;
         if (dest) {
             NSDictionary *options = @{(__bridge id)kCGImageDestinationLossyCompressionQuality: @(quality)};
