@@ -7,8 +7,8 @@ use clap::Parser;
 #[command(
     name = "ioscpy",
     version,
-    about = "Mirror and control a jailbroken iPhone from macOS over USB",
-    long_about = "ioscpy mirrors and controls a jailbroken iPhone from macOS over USB.\n\
+    about = "Mirror and control a jailbroken iPhone over USB or SSH",
+    long_about = "ioscpy mirrors and controls a jailbroken iPhone over USB or SSH.\n\
                   Run with no arguments to auto-connect the single attached device.\n\
                   All core features (screen, mouse, keyboard, clipboard, shortcuts,\n\
                   orientation, reconnect) are enabled by default."
@@ -17,6 +17,10 @@ pub struct Cli {
     /// Select a specific device by UDID (required when multiple are attached).
     #[arg(long, value_name = "UDID")]
     pub device: Option<String>,
+
+    /// Use an iPhone connected by USB to another Mac over SSH.
+    #[arg(long, value_name = "SSH_HOST", conflicts_with = "addr")]
+    pub remote: Option<String>,
 
     /// List attached compatible devices and exit.
     #[arg(long)]
@@ -121,6 +125,14 @@ pub struct Cli {
     /// Intended for embedding ioscpy in another native application.
     #[arg(long, hide = true)]
     pub stdio_bridge: bool,
+
+    /// Internal remote-host device discovery; prints JSON only.
+    #[arg(long, hide = true)]
+    pub list_json: bool,
+
+    /// Internal raw protocol relay over SSH standard streams.
+    #[arg(long, hide = true)]
+    pub relay_stdio: bool,
 }
 
 impl Cli {

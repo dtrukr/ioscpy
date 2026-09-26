@@ -17,6 +17,7 @@ mod logging;
 mod mouse;
 mod platform;
 mod protocol;
+mod remote;
 mod sidebar;
 mod update;
 mod usbmux;
@@ -55,15 +56,29 @@ fn main() {
 }
 
 fn run(cli: &Cli) -> Result<()> {
+    if cli.list_json {
+        println!("{}", serde_json::to_string(&remote::DeviceList {
+            protocol: protocol::PROTOCOL_VERSION,
+            devices: device::list_devices()?,
+        })?);
+        return Ok(());
+    }
+    if cli.relay_stdio {
+        let udid = cli.device.as_deref().ok_or_else(|| anyhow::anyhow!("--relay-stdio requires --device"))?;
+        return remote::relay_stdio(udid, cli.port.unwrap_or(protocol::DEFAULT_PORT));
+    }
     if cli.list {
-        return cmd_list();
+        return cmd_list(cli);
     }
     cmd_connect(cli)
 }
 
 /// Print attached devices, one per line.
-fn cmd_list() -> Result<()> {
-    let devices = device::list_devices()?;
+fn cmd_list(cli: &Cli) -> Result<()> {
+    let devices = match &cli.remote {
+        Some(host) => remote::list_devices(host)?,
+        None => device::list_devices()?,
+    };
     if devices.is_empty() {
         println!("No devices attached.");
         return Ok(());
@@ -86,7 +101,7 @@ fn cmd_connect(cli: &Cli) -> Result<()> {
         update::refresh_in_background();
     }
 
-    let banner = format!("ioscpy v{HOST_VERSION} - lautarovculic.com");
+    let banner = format!("ioscpy v{HOST_VERSION} - github.com/dtrukr/ioscpy");
     eprintln!("{banner}");
 
     let port = cli.port.unwrap_or(protocol::DEFAULT_PORT);
@@ -199,7 +214,7 @@ enum StdioBridgeCommand {
 }
 
 fn cmd_stdio_bridge(cli: &Cli, port: u16, stop: &Arc<AtomicBool>) -> Result<()> {
-    let mut forward: Option<usbmux::UsbForward> = None;
+    let mut forward: Option<remote::ConnectionGuard> = None;
     let mut stream = establish(cli, port, &mut forward)?;
     stream.set_nodelay(true).ok();
     stream.set_read_timeout(None).ok();
@@ -393,12 +408,12 @@ fn run_connection_loop(
     let mut first = true;
     while !stop.load(Ordering::Relaxed) {
         // The forward has to outlive the session, so keep it in scope here.
-        let mut forward: Option<usbmux::UsbForward> = None;
+        let mut forward: Option<remote::ConnectionGuard> = None;
 
         let mut stream = match establish(cli, port, &mut forward) {
             Ok(s) => s,
             Err(e) => {
-                if cli.addr.is_some() {
+                if cli.addr.is_some() || (cli.remote.is_some() && first) {
                     return Err(e);
                 }
                 warn!("{e:#}");
@@ -418,7 +433,7 @@ fn run_connection_loop(
         let ack = match protocol::handshake(&mut stream, HOST_VERSION) {
             Ok(ack) => ack,
             Err(e) => {
-                if cli.addr.is_some() {
+                if cli.addr.is_some() || (cli.remote.is_some() && first) {
                     return Err(anyhow::Error::new(e).context("handshake with ioscpyd failed"));
                 }
                 warn!("handshake failed: {e}");
@@ -488,7 +503,7 @@ fn run_connection_loop(
 
 /// Connect, stream, save the first frame's JPEG to `path`, then exit.
 fn cmd_snapshot(cli: &Cli, port: u16, path: &str) -> Result<()> {
-    let mut forward: Option<usbmux::UsbForward> = None;
+    let mut forward: Option<remote::ConnectionGuard> = None;
     let mut stream = establish(cli, port, &mut forward)?;
     stream.set_nodelay(true).ok();
     stream.set_read_timeout(Some(Duration::from_secs(15))).ok();
@@ -516,7 +531,12 @@ fn cmd_snapshot(cli: &Cli, port: u16, path: &str) -> Result<()> {
         }
         let frame = protocol::read_frame(&mut stream)?;
         if frame.message_type() == Some(protocol::MessageType::VideoFrame) {
-            if let Some((w, h, _, jpeg)) = protocol::parse_video_payload(&frame.payload) {
+            if let Some((w, h, flags, jpeg)) = protocol::parse_video_payload(&frame.payload) {
+                // A previous H.264 stream may still have a queued frame after
+                // START_STREAM requests MJPEG. Only write an actual JPEG.
+                if flags & protocol::VIDEO_FLAG_H264 != 0 || !jpeg.starts_with(&[0xff, 0xd8]) {
+                    continue;
+                }
                 std::fs::write(path, jpeg).with_context(|| format!("could not write {path}"))?;
                 println!("saved {w}x{h} frame ({} bytes) to {path}", jpeg.len());
                 let _ = protocol::write_frame(
@@ -534,7 +554,7 @@ fn cmd_snapshot(cli: &Cli, port: u16, path: &str) -> Result<()> {
 
 /// Stream for `secs` seconds with no window and print the numbers.
 fn cmd_bench(cli: &Cli, port: u16, secs: u64) -> Result<()> {
-    let mut forward: Option<usbmux::UsbForward> = None;
+    let mut forward: Option<remote::ConnectionGuard> = None;
     let mut stream = establish(cli, port, &mut forward)?;
     stream.set_nodelay(true).ok();
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
@@ -656,7 +676,7 @@ fn cmd_bench(cli: &Cli, port: u16, secs: u64) -> Result<()> {
 
 /// Send one or more automation input frames and exit without opening a window.
 fn cmd_one_shot_input(cli: &Cli, port: u16) -> Result<()> {
-    let mut forward: Option<usbmux::UsbForward> = None;
+    let mut forward: Option<remote::ConnectionGuard> = None;
     let mut stream = establish(cli, port, &mut forward)?;
     stream.set_nodelay(true).ok();
     stream.set_read_timeout(Some(Duration::from_secs(6))).ok();
@@ -735,7 +755,30 @@ fn cmd_one_shot_input(cli: &Cli, port: u16) -> Result<()> {
         send_touch_frame(&mut stream, protocol::TouchPhase::Up, x2, y2, &mut seq)?;
     }
 
+    // SSH may close immediately when this command returns. A PONG proves the
+    // daemon read every preceding control frame before the relay is dropped.
+    wait_control_drain(&mut stream, seq)?;
     Ok(())
+}
+
+fn wait_control_drain(stream: &mut TcpStream, seq: u64) -> Result<()> {
+    protocol::write_frame(
+        stream,
+        protocol::MessageType::Ping,
+        protocol::CHANNEL_CONTROL,
+        seq,
+        &[],
+    )?;
+    loop {
+        let frame = protocol::read_frame(stream).context("waiting for input acknowledgment")?;
+        match frame.message_type() {
+            Some(protocol::MessageType::Pong) if frame.header.seq == seq => return Ok(()),
+            Some(protocol::MessageType::Error) => {
+                bail!("the iPhone rejected an input command: {}", String::from_utf8_lossy(&frame.payload));
+            }
+            _ => {}
+        }
+    }
 }
 
 fn write_control_frame(
@@ -830,7 +873,7 @@ fn parse_key_code(raw: &str) -> Result<protocol::KeyCode> {
 
 /// Request a JSON accessibility tree from the device side and print it.
 fn cmd_accessibility_tree(cli: &Cli, port: u16) -> Result<()> {
-    let mut forward: Option<usbmux::UsbForward> = None;
+    let mut forward: Option<remote::ConnectionGuard> = None;
     let mut stream = establish(cli, port, &mut forward)?;
     stream.set_nodelay(true).ok();
     stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
@@ -885,7 +928,7 @@ fn cmd_accessibility_action(cli: &Cli, port: u16) -> Result<()> {
         .context("--accessibility-action requires JSON")?;
     let payload = accessibility_action_payload(raw)?;
 
-    let mut forward: Option<usbmux::UsbForward> = None;
+    let mut forward: Option<remote::ConnectionGuard> = None;
     let mut stream = establish(cli, port, &mut forward)?;
     stream.set_nodelay(true).ok();
     stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
@@ -937,10 +980,10 @@ fn accessibility_action_payload(raw: &str) -> Result<Vec<u8>> {
 
 /// Send one system action and exit without taking video ownership.
 fn cmd_action(cli: &Cli, port: u16, code: u16) -> Result<()> {
-    let mut forward: Option<usbmux::UsbForward> = None;
+    let mut forward: Option<remote::ConnectionGuard> = None;
     let mut stream = establish(cli, port, &mut forward)?;
     stream.set_nodelay(true).ok();
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+    stream.set_read_timeout(Some(Duration::from_secs(6))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(6))).ok();
 
     let ack = protocol::handshake(&mut stream, HOST_VERSION).context("handshake failed")?;
@@ -954,6 +997,7 @@ fn cmd_action(cli: &Cli, port: u16, code: u16) -> Result<()> {
         1,
         &code.to_be_bytes(),
     )?;
+    wait_control_drain(&mut stream, 2)?;
     println!("sent SYSTEM_ACTION {code}");
     Ok(())
 }
@@ -963,11 +1007,23 @@ fn cmd_action(cli: &Cli, port: u16, code: u16) -> Result<()> {
 fn establish(
     cli: &Cli,
     port: u16,
-    forward_slot: &mut Option<usbmux::UsbForward>,
+    forward_slot: &mut Option<remote::ConnectionGuard>,
 ) -> Result<TcpStream> {
     if let Some(addr) = &cli.addr {
         info!("connecting directly to {addr}");
         return TcpStream::connect(addr).with_context(|| format!("could not connect to {addr}"));
+    }
+
+    if let Some(host) = &cli.remote {
+        let devices = remote::list_devices(host)?;
+        if devices.is_empty() {
+            bail!("no USB iPhone attached to {host}");
+        }
+        let dev = device::select_device(devices, cli.device.as_deref())?;
+        info!("remote device {} on {} (iOS {})", dev.udid, host, dev.ios_version);
+        let (forward, stream) = remote::RemoteForward::start(host, &dev.udid, port)?;
+        *forward_slot = Some(remote::ConnectionGuard::Remote(forward));
+        return Ok(stream);
     }
 
     let devices = device::list_devices()?;
@@ -983,7 +1039,7 @@ fn establish(
         forward.local_port, forward.device_port
     );
     let stream = forward.connect()?;
-    *forward_slot = Some(forward);
+    *forward_slot = Some(remote::ConnectionGuard::Usb(forward));
     Ok(stream)
 }
 
@@ -993,7 +1049,7 @@ fn check_versions(ack: &protocol::HelloAck) -> Result<()> {
     if ack.protocol_version != protocol::PROTOCOL_VERSION {
         bail!(
             "the Mac and the phone are running different ioscpy versions (Mac speaks v{}, phone speaks v{}). \
-             Update both: run `brew upgrade ioscpy` here, and update ioscpy from your Sileo or Zebra repo on the phone.",
+             Update the forked host and device package from github.com/dtrukr/ioscpy.",
             protocol::PROTOCOL_VERSION,
             ack.protocol_version
         );
@@ -1023,13 +1079,11 @@ fn reconnect_wait(stop: &Arc<AtomicBool>) -> bool {
 fn print_debug_header(cli: &Cli) {
     eprintln!("ioscpy {HOST_VERSION}");
     eprintln!("os     {}", platform::os_version());
-    eprintln!(
-        "target {}",
-        cli.addr
-            .clone()
-            .or_else(|| cli.device.clone())
-            .unwrap_or_else(|| "auto (single attached device)".to_string())
-    );
+    let target = cli.remote.as_ref().map(|host| format!("remote {host}"))
+        .or_else(|| cli.addr.clone())
+        .or_else(|| cli.device.clone())
+        .unwrap_or_else(|| "auto (single attached device)".to_string());
+    eprintln!("target {target}");
 }
 
 #[cfg(test)]

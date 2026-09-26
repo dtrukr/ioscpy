@@ -1,12 +1,12 @@
 [package]
 name = "ioscpy"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 rust-version = "1.74"
-description = "macOS CLI to mirror and control a jailbroken iPhone over USB"
+description = "macOS CLI to mirror and control a jailbroken iPhone over USB or SSH"
 authors = ["Lautaro Villarreal Culic' <lautaro@lautarovculic.com> (https://lautarovculic.com)"]
 license = "MIT"
-homepage = "https://lautarovculic.com"
+homepage = "https://github.com/dtrukr/ioscpy"
 repository = "https://github.com/dtrukr/ioscpy"
 readme = "../README.md"
 keywords = ["ios", "jailbreak", "mirroring", "usbmux", "macos"]

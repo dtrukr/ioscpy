@@ -6,7 +6,7 @@ use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Device {
     pub udid: String,
     pub name: String,

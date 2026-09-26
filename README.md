@@ -35,6 +35,24 @@ brew install dtrukr/ioscpy/ioscpy
 ioscpy --version
 ```
 
+### iPhone connected to another Mac
+
+Install this fork's host on both Macs and the matching rootless device package on
+the iPhone. The remote Mac needs `iproxy`, `idevice_id`, and `ideviceinfo`, and
+its `ioscpy` command must be available to noninteractive SSH sessions. The phone
+stays connected by USB to that Mac; SSH carries video and control to this Mac.
+
+```bash
+ioscpy --remote mac-studio1 --list
+ioscpy --remote mac-studio1 --device 00008030-000879013C53402E
+```
+
+When the remote Mac has exactly one USB iPhone, omit `--device`. SSH host aliases,
+usernames, keys, and ports come from your normal `~/.ssh/config`. The same
+`--remote` option works with `--handshake-only`, `--snapshot`, accessibility,
+and one-shot input commands. No device daemon port needs to be exposed on the
+network. The local window handles keyboard and clipboard as usual.
+
 To build the host directly instead:
 
 ```bash

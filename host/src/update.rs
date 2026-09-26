@@ -11,7 +11,7 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const LATEST_URL: &str = "https://api.github.com/repos/lautarovculic/ioscpy/releases/latest";
+const LATEST_URL: &str = "https://api.github.com/repos/dtrukr/ioscpy/releases/latest";
 const REFRESH_SECS: u64 = 24 * 60 * 60;
 
 /// Where the last known release version is cached.
@@ -59,7 +59,7 @@ pub fn pending_notice(running: &str) -> Option<String> {
     let latest = read_cached()?;
     if newer(&latest, running) {
         Some(format!(
-            "🚨 NEW VERSION 🚨 ioscpy {latest} is available. Update with: brew upgrade ioscpy"
+            "🚨 NEW VERSION 🚨 ioscpy {latest} is available. Update with: brew upgrade dtrukr/ioscpy/ioscpy"
         ))
     } else {
         None
@@ -72,7 +72,7 @@ pub fn phone_behind_notice(daemon: &str, running: &str) -> Option<String> {
     if newer(running, daemon) {
         Some(format!(
             "Your iPhone is running an older ioscpy ({daemon}) than this Mac ({running}). \
-             Update it from your Sileo or Zebra repo."
+             Install the matching device package from github.com/dtrukr/ioscpy."
         ))
     } else {
         None

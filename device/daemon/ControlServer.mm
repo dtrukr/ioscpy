@@ -14,7 +14,7 @@
 #import <errno.h>
 #import <dispatch/dispatch.h>
 
-NSString *const IOSPYDaemonVersion = @"0.1.5";
+NSString *const IOSPYDaemonVersion = @"0.1.6";
 
 @implementation IOSPYControlServer {
     uint16_t _port;
