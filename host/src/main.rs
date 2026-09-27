@@ -215,6 +215,8 @@ enum StdioBridgeCommand {
     Text { text: String },
     Key { key: String },
     KeyboardMode { suppress: bool },
+    /// Ask the phone for a keyframe with fresh SPS/PPS (H.264 bridge).
+    Keyframe,
 }
 
 fn cmd_stdio_bridge(cli: &Cli, port: u16, stop: &Arc<AtomicBool>) -> Result<()> {
@@ -232,14 +234,28 @@ fn cmd_stdio_bridge(cli: &Cli, port: u16, stop: &Arc<AtomicBool>) -> Result<()> 
         bail!("the phone side is not advertising an input backend");
     }
 
+    // H.264 only when the embedder asked for it and the phone offers it; the
+    // phone's encoded frames are then passed through untouched.
+    let want_h264 = cli.bridge_codec.eq_ignore_ascii_case("h264")
+        && ack.capabilities.stream_backends.iter().any(|b| b == "h264");
     let mut writer = stream.try_clone().context("clone bridge control stream")?;
     protocol::write_frame(
         &mut writer,
         protocol::MessageType::StartStream,
         protocol::CHANNEL_CONTROL,
         0,
-        &[protocol::VIDEO_CODEC_MJPEG],
+        &[if want_h264 { protocol::VIDEO_CODEC_H264 } else { protocol::VIDEO_CODEC_MJPEG }],
     )?;
+    if want_h264 {
+        protocol::write_frame(
+            &mut writer,
+            protocol::MessageType::RequestKeyframe,
+            protocol::CHANNEL_CONTROL,
+            0,
+            &[],
+        )?;
+    }
+    eprintln!("ioscpy bridge: codec {}", if want_h264 { "h264" } else { "mjpeg" });
 
     let (command_tx, command_rx) = mpsc::channel::<StdioBridgeCommand>();
     let input_stop = stop.clone();
@@ -349,6 +365,14 @@ fn cmd_stdio_bridge(cli: &Cli, port: u16, stop: &Arc<AtomicBool>) -> Result<()> 
                         &mut seq,
                     )?;
                 }
+                Ok(StdioBridgeCommand::Keyframe) => {
+                    write_control_frame(
+                        &mut writer,
+                        protocol::MessageType::RequestKeyframe,
+                        &[],
+                        &mut seq,
+                    )?;
+                }
                 Ok(StdioBridgeCommand::KeyboardMode { suppress }) => {
                     write_control_frame(
                         &mut writer,
@@ -380,7 +404,7 @@ fn cmd_stdio_bridge(cli: &Cli, port: u16, stop: &Arc<AtomicBool>) -> Result<()> 
         else {
             continue;
         };
-        if flags & protocol::VIDEO_FLAG_H264 != 0 {
+        if flags & protocol::VIDEO_FLAG_H264 != 0 && !want_h264 {
             continue;
         }
 

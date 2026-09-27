@@ -121,10 +121,16 @@ pub struct Cli {
     #[arg(long, value_name = "SECONDS", hide = true)]
     pub soak: Option<u64>,
 
-    /// Stream MJPEG frames to stdout and accept JSON-line controls on stdin.
+    /// Stream video frames to stdout and accept JSON-line controls on stdin.
     /// Intended for embedding ioscpy in another native application.
     #[arg(long, hide = true)]
     pub stdio_bridge: bool,
+
+    /// Codec the stdio bridge asks the phone for: `mjpeg` (default, for older
+    /// embedders) or `h264`. H.264 frames are written unchanged (AVCC, with
+    /// the H264/KEYFRAME/CONFIG flag bits); the embedder decodes them.
+    #[arg(long, value_name = "CODEC", default_value = "mjpeg", hide = true)]
+    pub bridge_codec: String,
 
     /// Internal remote-host device discovery; prints JSON only.
     #[arg(long, hide = true)]
